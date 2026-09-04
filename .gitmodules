@@ -1,0 +1,9 @@
+[submodule "rust/vendor/core"]
+	path = rust/vendor/core
+	url = https://github.com/AstralSightStudios/AstroBox-NG-Module-Core
+[submodule "rust/vendor/pb"]
+	path = rust/vendor/pb
+	url = https://github.com/AstralSightStudios/AstroBox-NG-Module-Pb
+[submodule "rust/vendor/vivo_msgpack"]
+	path = rust/vendor/vivo_msgpack
+	url = https://github.com/AstralSightStudios/AstroBox-NG-Module-Vivo-MsgPack

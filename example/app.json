@@ -1,0 +1,14 @@
+{
+  "expo": {
+    "name": "ExpoABCoreExample",
+    "slug": "expo-abcore-example",
+    "version": "1.0.0",
+    "ios": {
+      "bundleIdentifier": "com.bandbbs.expoabcore.example"
+    },
+    "android": {
+      "package": "com.bandbbs.expoabcore.example"
+    },
+    "plugins": ["expo-abcore"]
+  }
+}

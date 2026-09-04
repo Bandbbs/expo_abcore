@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: ['main']
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+      - uses: android-actions/setup-android@v3
+      - run: sdkmanager 'ndk;28.2.13676358'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - run: pnpm typecheck
+      - run: pnpm build:rust
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/28.2.13676358
+      - run: pnpm generate:licenses
+      - run: pnpm package:release
+      - run: pnpm verify:release
+      - run: pnpm --dir example install --no-frozen-lockfile
+      - run: pnpm --dir example exec tsc --noEmit
+      - run: pnpm --dir example exec expo prebuild --clean
+      - run: ./gradlew :expo-abcore:compileDebugKotlin
+        working-directory: example/android
+      - run: xcodebuild -workspace ExpoABCoreExample.xcworkspace -scheme ExpoABCoreExample -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build
+        working-directory: example/ios

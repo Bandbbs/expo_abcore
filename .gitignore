@@ -1,0 +1,13 @@
+node_modules/
+android/build/
+android/.gradle/
+rust/target/
+ios/build/
+ios/ExpoABCore.xcframework/
+*.tgz
+dist/
+example/android/
+example/ios/
+example/node_modules/
+example/pnpm-lock.yaml
+.DS_Store

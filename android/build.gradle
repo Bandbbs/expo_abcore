@@ -1,0 +1,25 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'com.bandbbs.expoabcore'
+version = '0.1.0'
+
+android {
+  namespace 'com.bandbbs.expoabcore'
+
+  defaultConfig {
+    versionCode 1
+    versionName '0.1.0'
+  }
+
+  sourceSets {
+    main.jniLibs.srcDirs = ['src/main/jniLibs']
+  }
+}
+
+dependencies {
+  implementation 'androidx.core:core-ktx:1.17.0'
+  implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2'
+}

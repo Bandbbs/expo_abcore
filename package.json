@@ -1,0 +1,66 @@
+{
+  "name": "expo-abcore",
+  "version": "0.1.0",
+  "description": "Expo native module for AstroBox wearable connectivity and installation.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "files": [
+    "android",
+    "ios",
+    "plugin",
+    "src",
+    "LICENSE",
+    "ADDITIONAL-TERMS.md",
+    "LINKING-EXCEPTION.md",
+    "AUTHORIZED_HOSTS.md",
+    "UPSTREAM-VERSIONS.md",
+    "NOTICE",
+    "THIRD_PARTY_NOTICES.json",
+    "expo-module.config.json",
+    "app.plugin.js"
+  ],
+  "scripts": {
+    "build:rust": "node ./scripts/build-rust.mjs",
+    "build:android": "node ./scripts/build-rust.mjs android",
+    "build:ios": "node ./scripts/build-rust.mjs ios",
+    "generate:licenses": "node ./scripts/generate-licenses.mjs",
+    "package:release": "node ./scripts/package-release.mjs",
+    "verify:release": "node ./scripts/verify-release.mjs",
+    "prepack": "pnpm generate:licenses",
+    "test": "pnpm test:queue && pnpm test:rust && pnpm test:native-contract",
+    "test:queue": "node --import tsx --test src/__tests__/queue.test.ts",
+    "test:rust": "cargo test --manifest-path rust/Cargo.toml",
+    "test:native-contract": "node ./scripts/verify-native-contract.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "expo",
+    "react-native",
+    "astrobox",
+    "xiaomi",
+    "vivo",
+    "wearable"
+  ],
+  "homepage": "https://github.com/Bandbbs/expo_abcore",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Bandbbs/expo_abcore.git"
+  },
+  "license": "AGPL-3.0-only",
+  "author": "Bandbbs and AstralSightStudios contributors",
+  "peerDependencies": {
+    "expo": "^57.0.0",
+    "expo-modules-core": "^57.0.0",
+    "react": "^19.2.0",
+    "react-native": "^0.86.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "expo-modules-core": "^57.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "~6.0.3"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

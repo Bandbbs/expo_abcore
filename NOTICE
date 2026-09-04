@@ -1,0 +1,9 @@
+expo-abcore incorporates and links AstroBox-NG protocol components.
+
+AstroBox-NG and its protocol modules:
+Copyright (C) 2025-2026 AstralSight Studios and contributors.
+https://github.com/AstralSightStudios/AstroBox-NG
+
+Source revisions are recorded in rust/vendor submodules and THIRD_PARTY_NOTICES.json.
+Bluetooth transport code was adapted from AstroBox-NG Bluetooth revision 91db36fe.
+Android SPP transport code was adapted from AstroBox-NG Android SPP revision a6607018.

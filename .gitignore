@@ -9,5 +9,4 @@ dist/
 example/android/
 example/ios/
 example/node_modules/
-example/pnpm-lock.yaml
 .DS_Store

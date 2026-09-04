@@ -8,9 +8,9 @@ on:
 jobs:
   verify:
     runs-on: macos-15
-    # ExpoModulesJSI 57.0.8 requires Swift 6.2 but does not compile with Xcode 26.2.
+    # ExpoModulesJSI 57.0.8 requires Swift 6.2; the example lockfile carries its compatibility patch.
     env:
-      DEVELOPER_DIR: /Applications/Xcode_26.0.1.app/Contents/Developer
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
     steps:
       - uses: actions/checkout@v4
         with:
@@ -40,7 +40,7 @@ jobs:
       - run: pnpm generate:licenses
       - run: pnpm package:release
       - run: pnpm verify:release
-      - run: pnpm --dir example install --no-frozen-lockfile
+      - run: pnpm --dir example install --frozen-lockfile
       - run: pnpm --dir example exec tsc --noEmit
       - run: pnpm --dir example exec expo prebuild --clean
       - run: ./gradlew :expo-abcore:compileDebugKotlin

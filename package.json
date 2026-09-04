@@ -26,6 +26,7 @@
     "generate:licenses": "node ./scripts/generate-licenses.mjs",
     "package:release": "node ./scripts/package-release.mjs",
     "verify:release": "node ./scripts/verify-release.mjs",
+    "sync:example-integrity": "node ./scripts/sync-example-integrity.mjs",
     "prepack": "pnpm generate:licenses",
     "test": "pnpm test:queue && pnpm test:rust && pnpm test:native-contract",
     "test:queue": "node --import tsx --test src/__tests__/queue.test.ts",

@@ -46,6 +46,7 @@ jobs:
       - run: pnpm generate:licenses
       - run: pnpm package:release
       - run: pnpm verify:release
+      - run: pnpm sync:example-integrity
       - run: pnpm --dir example install --frozen-lockfile
       - run: pnpm --dir example exec tsc --noEmit
       - run: pnpm --dir example exec expo prebuild --clean

@@ -26,19 +26,32 @@ function withExpoABCore(config, options = {}) {
       AndroidConfig.Permissions.addPermission(next.modResults, permission);
     }
 
-    const permissions = next.modResults.manifest['uses-permission'] || [];
+    const managedPermissions = new Set(ANDROID_PERMISSIONS);
+    const seenPermissions = new Set();
+    const permissions = (next.modResults.manifest['uses-permission'] || []).filter((entry) => {
+      const name = entry.$?.['android:name'];
+      if (!managedPermissions.has(name)) return true;
+      if (seenPermissions.has(name)) return false;
+      seenPermissions.add(name);
+      return true;
+    });
+    next.modResults.manifest['uses-permission'] = permissions;
     for (const entry of permissions) {
       const name = entry.$?.['android:name'];
       if (
         name === 'android.permission.BLUETOOTH' ||
-        name === 'android.permission.BLUETOOTH_ADMIN' ||
-        name === 'android.permission.ACCESS_COARSE_LOCATION' ||
-        name === 'android.permission.ACCESS_FINE_LOCATION'
+        name === 'android.permission.BLUETOOTH_ADMIN'
       ) {
         entry.$['android:maxSdkVersion'] = '30';
       }
+      if (
+        name === 'android.permission.ACCESS_COARSE_LOCATION' ||
+        name === 'android.permission.ACCESS_FINE_LOCATION'
+      ) {
+        delete entry.$['android:maxSdkVersion'];
+      }
       if (name === 'android.permission.BLUETOOTH_SCAN') {
-        entry.$['android:usesPermissionFlags'] = 'neverForLocation';
+        delete entry.$['android:usesPermissionFlags'];
       }
     }
     next.modResults.manifest['uses-feature'] ||= [];

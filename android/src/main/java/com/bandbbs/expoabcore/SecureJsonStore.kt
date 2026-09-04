@@ -22,7 +22,9 @@ internal class SecureJsonStore(context: Context) {
   }
 
   fun set(key: String, value: String) {
-    preferences.edit().putString(key, encrypt(value)).apply()
+    check(preferences.edit().putString(key, encrypt(value)).commit()) {
+      "Unable to persist secure data"
+    }
   }
 
   private fun encrypt(value: String): String {

@@ -1,28 +1,30 @@
-use std::ffi::{c_char, c_int, c_void, CStr, CString};
+use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Once, OnceLock};
+use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context, Result};
-use corelib::device::data::{request_device_data_json, DeviceDataType};
+use anyhow::{Context, Result, anyhow, bail};
+use corelib::device::data::{DeviceDataType, request_device_data_json};
 use corelib::device::vivo::{
     SendError as VivoSendError, VivoBindStartType, VivoConnectType, VivoDeviceConfig,
 };
+use corelib::device::xiaomi::SendError as XiaomiSendError;
 use corelib::device::xiaomi::components::install::InstallSystem;
 use corelib::device::xiaomi::packet::dispatcher as xiaomi_dispatcher;
 use corelib::device::xiaomi::packet::mass::MassDataType;
+use corelib::device::xiaomi::resutils::{FileType, get_file_type};
 use corelib::device::xiaomi::r#type::ConnectType as XiaomiConnectType;
-use corelib::device::xiaomi::resutils::{get_file_type, FileType};
-use corelib::device::xiaomi::SendError as XiaomiSendError;
-use corelib::device::{cleanup_device_state, create_device, create_vivo_device, DeviceKind};
-use jni::objects::{GlobalRef, JByteArray, JObject, JString, JValue};
-use jni::sys::{jint, jstring, JNI_VERSION_1_6};
+use corelib::device::{DeviceKind, cleanup_device_state, create_device, create_vivo_device};
 use jni::JNIEnv;
 use jni::JavaVM;
+use jni::objects::{GlobalRef, JByteArray, JObject, JString, JValue};
+use jni::sys::{JNI_VERSION_1_6, jint, jstring};
 use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::runtime::Runtime;
 
 type SendCallback = unsafe extern "C" fn(*mut c_void, *const u8, usize) -> c_int;
@@ -263,7 +265,7 @@ fn connect_device(request: ConnectRequest) -> Result<Value> {
                 request.tx_win_overrun_allowance,
                 Some(60 * 1024),
                 request.ble_mtu.map(|mtu| mtu.saturating_sub(3).max(20)),
-                true,
+                false,
                 sender,
             ))?
         }
@@ -356,7 +358,35 @@ fn classify_file(request: ClassifyRequest) -> Result<Value> {
             corelib::device::vivo::quickapp_manifest::parse_vivo_quick_app_manifest(&data).ok()
         })
         .flatten();
-    let candidate = if let Some(manifest) = vivo_dial {
+    let candidate = if file_type == FileType::Firmware {
+        Some(InstallCandidate {
+            resource_type: "firmware",
+            compatible_device_kinds: vec!["xiaomi"],
+            confidence: "content",
+            package_name: None,
+            version_name: None,
+        })
+    } else if file_type == FileType::WatchFace {
+        Some(InstallCandidate {
+            resource_type: "watchface",
+            compatible_device_kinds: vec!["xiaomi"],
+            confidence: "content",
+            package_name: None,
+            version_name: None,
+        })
+    } else if file_type == FileType::ThirdPartyApp {
+        Some(InstallCandidate {
+            resource_type: "quickApp",
+            compatible_device_kinds: vec!["xiaomi"],
+            confidence: "manifest",
+            package_name: vivo_quick_app
+                .as_ref()
+                .map(|manifest| manifest.package.clone()),
+            version_name: vivo_quick_app
+                .as_ref()
+                .and_then(|manifest| non_empty(manifest.version_name.clone())),
+        })
+    } else if let Some(manifest) = vivo_dial {
         Some(InstallCandidate {
             resource_type: "watchface",
             compatible_device_kinds: vec!["vivo"],
@@ -374,27 +404,6 @@ fn classify_file(request: ClassifyRequest) -> Result<Value> {
         })
     } else {
         match file_type {
-            FileType::Firmware => Some(InstallCandidate {
-                resource_type: "firmware",
-                compatible_device_kinds: vec!["xiaomi"],
-                confidence: "content",
-                package_name: None,
-                version_name: None,
-            }),
-            FileType::WatchFace => Some(InstallCandidate {
-                resource_type: "watchface",
-                compatible_device_kinds: vec!["xiaomi"],
-                confidence: "content",
-                package_name: None,
-                version_name: None,
-            }),
-            FileType::ThirdPartyApp => Some(InstallCandidate {
-                resource_type: "quickApp",
-                compatible_device_kinds: vec!["xiaomi"],
-                confidence: "manifest",
-                package_name: None,
-                version_name: None,
-            }),
             _ if is_zip => {
                 if name.ends_with(".mwz") {
                     Some(InstallCandidate {
@@ -465,7 +474,7 @@ fn install_file(request: InstallRequest) -> Result<Value> {
 fn install_xiaomi(request: &InstallRequest, data: Vec<u8>, job_id: String) -> Result<()> {
     let address = request.address.clone();
     let resource_type = parse_resource_type(&request.resource_type)?;
-    if request.force && resource_type == MassDataType::Watchface {
+    let watchface_id = if resource_type == MassDataType::Watchface {
         let address_for_config = address.clone();
         let res_config = runtime().block_on(async move {
             corelib::ecs::with_rt_mut(move |rt| {
@@ -474,17 +483,26 @@ fn install_xiaomi(request: &InstallRequest, data: Vec<u8>, job_id: String) -> Re
             })
             .await
         });
-        if let Some(config) = res_config {
-            if let Some(id) = corelib::device::xiaomi::resutils::get_watchface_id(&data, &config) {
-                let _ =
-                    runtime().block_on(corelib::device::watchface::uninstall(address.clone(), id));
-            }
+        res_config
+            .and_then(|config| corelib::device::xiaomi::resutils::get_watchface_id(&data, &config))
+    } else {
+        None
+    };
+    if request.force {
+        if let Some(id) = watchface_id.as_ref() {
+            let _ = runtime().block_on(corelib::device::watchface::uninstall(
+                address.clone(),
+                id.clone(),
+            ));
         }
     }
     let package_name = request.package_name.clone();
+    let transfer_complete = Arc::new(AtomicBool::new(false));
+    let transfer_complete_for_callback = transfer_complete.clone();
+    let address_for_install = address.clone();
     let install_future = runtime().block_on(async move {
         corelib::ecs::with_rt_mut(move |rt| {
-            rt.with_device_mut(&address, |world, entity| {
+            rt.with_device_mut(&address_for_install, |world, entity| {
                 let mut system = world
                     .get_mut::<InstallSystem>(entity)
                     .ok_or_else(|| anyhow!("Install system not found"))?;
@@ -493,6 +511,9 @@ fn install_xiaomi(request: &InstallRequest, data: Vec<u8>, job_id: String) -> Re
                     data,
                     Some(package_name.as_deref().unwrap_or("a.b.c")),
                     Arc::new(move |progress| {
+                        if progress.progress >= 1.0 {
+                            transfer_complete_for_callback.store(true, Ordering::Release);
+                        }
                         emit_event(
                             "installProgress",
                             &json!({
@@ -509,8 +530,37 @@ fn install_xiaomi(request: &InstallRequest, data: Vec<u8>, job_id: String) -> Re
         })
         .await
     })?;
-    runtime().block_on(install_future)?;
-    Ok(())
+    match runtime().block_on(install_future) {
+        Ok(()) => Ok(()),
+        Err(error)
+            if transfer_complete.load(Ordering::Acquire)
+                && watchface_id
+                    .as_deref()
+                    .is_some_and(|id| verify_xiaomi_watchface_installed(&address, id)) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn verify_xiaomi_watchface_installed(address: &str, watchface_id: &str) -> bool {
+    let address = address.to_string();
+    let watchface_id = watchface_id.to_string();
+    runtime().block_on(async move {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(8),
+            corelib::device::resource::request_watchface_list_json(address),
+        )
+        .await;
+        let Ok(Ok(Value::Array(items))) = result else {
+            return false;
+        };
+        items
+            .iter()
+            .any(|item| item.get("id").and_then(Value::as_str) == Some(watchface_id.as_str()))
+    })
 }
 
 fn install_vivo(request: &InstallRequest, data: Vec<u8>, job_id: String) -> Result<()> {
@@ -721,11 +771,7 @@ pub extern "system" fn Java_com_bandbbs_expoabcore_RustBridge_nativeInit(
         }
         Ok(())
     })();
-    if result.is_ok() {
-        0
-    } else {
-        -1
-    }
+    if result.is_ok() { 0 } else { -1 }
 }
 
 #[unsafe(no_mangle)]
@@ -852,6 +898,42 @@ mod tests {
         assert_eq!(value["compatibleDeviceKinds"], json!(["vivo"]));
         assert_eq!(value["packageName"], "com.example.watchapp");
         assert_eq!(value["versionName"], "1.2.3");
+        let _ = fs::remove_file(temp);
+    }
+
+    #[test]
+    fn identifies_xiaomi_quick_app_before_generic_vivo_manifest() {
+        use std::io::Write as _;
+
+        let temp = std::env::temp_dir().join("expo-abcore-xiaomi-quick-app.rpk");
+        let mut data = Vec::new();
+        {
+            let cursor = std::io::Cursor::new(&mut data);
+            let mut archive = zip::ZipWriter::new(cursor);
+            archive
+                .start_file("manifest.json", zip::write::FileOptions::default())
+                .unwrap();
+            archive
+                .write_all(
+                    br#"{"package":"com.example.miwear","name":"Example","versionName":"2.0.0","versionCode":8}"#,
+                )
+                .unwrap();
+            archive
+                .start_file("manifest-watch.json", zip::write::FileOptions::default())
+                .unwrap();
+            archive.write_all(br#"{"type":"wearable"}"#).unwrap();
+            archive.finish().unwrap();
+        }
+        fs::write(&temp, data).unwrap();
+        let value = classify_file(ClassifyRequest {
+            path: temp.to_string_lossy().to_string(),
+            name: "example.rpk".to_string(),
+        })
+        .unwrap();
+        assert_eq!(value["resourceType"], "quickApp");
+        assert_eq!(value["compatibleDeviceKinds"], json!(["xiaomi"]));
+        assert_eq!(value["packageName"], "com.example.miwear");
+        assert_eq!(value["versionName"], "2.0.0");
         let _ = fs::remove_file(temp);
     }
 }

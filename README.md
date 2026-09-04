@@ -24,8 +24,9 @@ plugin:
 }
 ```
 
-The plugin declares foreground Bluetooth permissions for Android and the iOS
-Bluetooth usage description. It does not enable background Bluetooth modes.
+The plugin declares foreground Bluetooth and precise location permissions for
+Android, matching AstroBox's BLE discovery requirements, and the iOS Bluetooth
+usage description. It does not enable background Bluetooth modes.
 Run Expo prebuild after installing the dependency. Android release artifacts
 include `arm64-v8a`, `armeabi-v7a`, and `x86_64`; the iOS XCFramework includes
 arm64 device and arm64/x86_64 simulator slices.

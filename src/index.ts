@@ -37,7 +37,7 @@ export async function requestPermissions(): Promise<PermissionState> {
   const undetermined = result.status === 'undetermined';
   return {
     bluetooth: granted ? 'granted' : undetermined ? 'undetermined' : 'denied',
-    location: Platform.OS === 'ios' || (Platform.OS === 'android' && Number(Platform.Version) >= 31)
+    location: Platform.OS === 'ios'
       ? 'notRequired'
       : granted
         ? 'granted'

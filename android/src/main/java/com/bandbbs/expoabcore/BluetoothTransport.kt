@@ -87,6 +87,7 @@ class BluetoothTransport(
     private val bleScannedDevices = mutableListOf<BleScannedDevice>()
     private val bleDeviceCache = mutableMapOf<String, BluetoothDevice>()
     private var bleScanCallback: ScanCallback? = null
+    private var classicScanReceiverRegistered = false
 
     private var socket: BluetoothSocket? = null
     private var inStream: InputStream? = null
@@ -118,6 +119,7 @@ class BluetoothTransport(
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> arrayOf(
                 Manifest.permission.BLUETOOTH_SCAN,
                 Manifest.permission.BLUETOOTH_CONNECT,
+                Manifest.permission.ACCESS_FINE_LOCATION,
             )
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q -> arrayOf(
                 Manifest.permission.ACCESS_FINE_LOCATION,
@@ -344,15 +346,15 @@ class BluetoothTransport(
             return
         }
         scannedDevices.clear()
+        stopScan()
         adapter?.let { bt ->
-            if (bt.isDiscovering) bt.cancelDiscovery()
-
             val filter = IntentFilter(BluetoothDevice.ACTION_FOUND)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 context.registerReceiver(scanReceiver, filter, RECEIVER_EXPORTED)
             } else {
                 context.registerReceiver(scanReceiver, filter)
             }
+            classicScanReceiverRegistered = true
             bt.startDiscovery()
         }
     }
@@ -360,7 +362,10 @@ class BluetoothTransport(
     @SuppressLint("MissingPermission")
     fun stopScan() {
         adapter?.cancelDiscovery()
-        try { context.unregisterReceiver(scanReceiver) } catch (_: IllegalArgumentException) {}
+        if (classicScanReceiverRegistered) {
+            try { context.unregisterReceiver(scanReceiver) } catch (_: IllegalArgumentException) {}
+            classicScanReceiverRegistered = false
+        }
     }
 
     @SuppressLint("MissingPermission")

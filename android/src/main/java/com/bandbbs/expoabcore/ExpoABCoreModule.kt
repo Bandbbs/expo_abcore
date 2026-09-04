@@ -93,7 +93,7 @@ class ExpoABCoreModule : Module(), RustBridge.Callbacks {
       val transportFilter = options?.get("transport") as? String
       stopScanning()
       if (transportFilter == null || transportFilter == "ble") transport.startBleScan()
-      if (transportFilter == null || transportFilter == "spp") transport.startScan()
+      if (transportFilter == "spp") transport.startScan()
       sendEvent("scanStateChanged", mapOf("scanning" to true))
       val emitted = mutableSetOf<String>()
       scanJob = scope.launch {
@@ -110,7 +110,11 @@ class ExpoABCoreModule : Module(), RustBridge.Callbacks {
                     "name" to (device.name ?: device.address),
                     "address" to device.address,
                     "kind" to kind,
-                    "transports" to listOf("ble"),
+                    "transports" to if (kind == "xiaomi") {
+                      listOf("ble", "spp")
+                    } else {
+                      listOf("ble")
+                    },
                   ),
                 )
               }
@@ -452,6 +456,7 @@ class ExpoABCoreModule : Module(), RustBridge.Callbacks {
     Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> arrayOf(
       Manifest.permission.BLUETOOTH_SCAN,
       Manifest.permission.BLUETOOTH_CONNECT,
+      Manifest.permission.ACCESS_FINE_LOCATION,
     )
     Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q -> arrayOf(
       Manifest.permission.ACCESS_FINE_LOCATION,
@@ -464,7 +469,10 @@ class ExpoABCoreModule : Module(), RustBridge.Callbacks {
     if (runtimePermissions().any {
         ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
       }) {
-      throw ExpoABCoreException("PERMISSION_DENIED", "Bluetooth permission is required")
+      throw ExpoABCoreException(
+        "PERMISSION_DENIED",
+        "Bluetooth and precise location permissions are required",
+      )
     }
   }
 

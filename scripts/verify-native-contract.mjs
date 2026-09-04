@@ -37,7 +37,9 @@ for (const permission of [
   assert.match(plugin, new RegExp(`android.permission.${permission}`));
 }
 assert.match(plugin, /android:maxSdkVersion/);
-assert.match(plugin, /neverForLocation/);
+assert.doesNotMatch(plugin, /neverForLocation/);
+assert.match(androidStore, /\.commit\(\)/);
+assert.doesNotMatch(androidStore, /\.apply\(\)/);
 assert.match(plugin, /NSBluetoothAlwaysUsageDescription/);
 assert.doesNotMatch(plugin, /UIBackgroundModes/);
 

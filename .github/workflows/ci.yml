@@ -8,8 +8,9 @@ on:
 jobs:
   verify:
     runs-on: macos-15
+    # ExpoModulesJSI 57.0.8 requires Swift 6.2 but does not compile with Xcode 26.2.
     env:
-      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
+      DEVELOPER_DIR: /Applications/Xcode_26.0.1.app/Contents/Developer
     steps:
       - uses: actions/checkout@v4
         with:

@@ -1,3 +1,5 @@
+mod authkey;
+
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::fs;
 use std::path::Path;
@@ -223,6 +225,15 @@ pub unsafe extern "C" fn expo_abcore_string_free(ptr: *mut c_char) {
 
 fn dispatch(command: &str, input: &str) -> Result<Value> {
     match command {
+        "extractAuthKeys" => {
+            let value: Value = serde_json::from_str(input)?;
+            let path = value["path"].as_str().context("Missing log file")?;
+            let platform = value["platform"].as_str().context("Missing log platform")?;
+            let pairs = authkey::extract(Path::new(path), platform)
+                .map_err(|_| anyhow!("Unable to extract device keys from selected log"))?;
+            Ok(Value::Array(pairs.into_iter().map(|pair| json!({"name": pair.name, "authKey": pair.encrypt_key, "platform": platform})).collect()))
+        }
+        "resource" => resource_command(serde_json::from_str(input)?),
         "connect" => connect_device(serde_json::from_str(input)?),
         "disconnect" => disconnect_device(),
         "refresh" => refresh_device(serde_json::from_str(input)?),
@@ -230,6 +241,49 @@ fn dispatch(command: &str, input: &str) -> Result<Value> {
         "install" => install_file(serde_json::from_str(input)?),
         _ => bail!("Unknown command: {command}"),
     }
+}
+
+fn resource_command(request: Value) -> Result<Value> {
+    let active = active_device()
+        .lock()
+        .clone()
+        .context("No connected device")?;
+    let address = request["address"]
+        .as_str()
+        .context("Missing resource target")?;
+    if !active.address.eq_ignore_ascii_case(address) {
+        bail!("Connected device changed");
+    }
+    let action = request["action"]
+        .as_str()
+        .context("Missing resource action")?;
+    let id = request["id"].as_str().unwrap_or_default().to_string();
+    runtime().block_on(async move {
+        tokio::time::timeout(Duration::from_secs(20), async move {
+            use corelib::device::{resource, thirdparty_app, watchface};
+            match action {
+                "listWatchfaces" => resource::request_watchface_list_json(active.address).await,
+                "listApps" => resource::request_quick_app_list_json(active.address).await,
+                _ => {
+                    if id.is_empty() {
+                        bail!("Missing resource identifier");
+                    }
+                    match action {
+                        "setWatchface" => watchface::set_current(active.address, id).await?,
+                        "removeWatchface" => watchface::uninstall(active.address, id).await?,
+                        "launchApp" => {
+                            thirdparty_app::launch(active.address, id, String::new()).await?
+                        }
+                        "removeApp" => thirdparty_app::uninstall(active.address, id).await?,
+                        _ => bail!("Unsupported resource action"),
+                    }
+                    Ok(Value::Null)
+                }
+            }
+        })
+        .await
+        .context("Device resource request timed out")?
+    })
 }
 
 fn connect_device(request: ConnectRequest) -> Result<Value> {

@@ -1,6 +1,6 @@
 [package]
 name = "expo_abcore"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 publish = false
 
@@ -22,8 +22,10 @@ serde_json = "1"
 tokio = { version = "1.48", default-features = false, features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
 uuid = { version = "1.18", features = ["v4"] }
 
+zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
+nskeyedarchiver_converter = "0.1.3"
+
 [dev-dependencies]
-zip = "0.6.6"
 
 [profile.release]
 lto = "thin"

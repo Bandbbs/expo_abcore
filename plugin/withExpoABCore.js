@@ -5,6 +5,9 @@ const {
 } = require('expo/config-plugins');
 
 const ANDROID_PERMISSIONS = [
+  'android.permission.FOREGROUND_SERVICE',
+  'android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE',
+  'android.permission.POST_NOTIFICATIONS',
   'android.permission.BLUETOOTH',
   'android.permission.BLUETOOTH_ADMIN',
   'android.permission.BLUETOOTH_SCAN',

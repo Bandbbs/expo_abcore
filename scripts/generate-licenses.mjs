@@ -124,7 +124,7 @@ const project = [
   {
     id: 'project:expo-abcore',
     name: 'expo-abcore',
-    version: '0.1.0',
+    version: JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version,
     license: 'AGPL-3.0-only with attribution and authorized-host exception',
     authors: ['Bandbbs', 'AstralSightStudios contributors'],
     repository: 'https://github.com/Bandbbs/expo_abcore',
@@ -193,7 +193,13 @@ const native = [
   },
 ];
 
-const items = [...project, ...javascriptLicenses(), ...cargoLicenses(), ...native]
+const logReader = {
+  id: 'rust:mifitness-log-reader', name: 'MiFitnessLogReader', version: 'source',
+  license: 'MIT', authors: ['AstralSight Studios'], source: 'rust',
+  repository: 'https://github.com/AstralSightStudios/AstroBox-NG-Plugin-MiFitnessLogReader',
+  licenseText: readFileSync(join(root, 'licenses/MiFitnessLogReader-MIT.txt'), 'utf8'),
+};
+const items = [logReader, ...project, ...javascriptLicenses(), ...cargoLicenses(), ...native]
   .filter((item, index, array) => array.findIndex((other) => other.id === item.id) === index)
   .sort((a, b) => {
     const pinnedIds = project.map((item) => item.id);

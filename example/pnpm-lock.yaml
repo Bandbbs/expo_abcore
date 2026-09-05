@@ -17,8 +17,8 @@ importers:
         specifier: ~57.0.18
         version: 57.0.19(@babel/core@7.29.7)(@expo/dom-webview@57.0.1)(react-native@0.86.3(@babel/core@7.29.7)(@types/react@19.2.18)(react@19.2.3))(react@19.2.3)(typescript@6.0.3)
       expo-abcore:
-        specifier: file:../dist/expo-abcore-0.1.0.tgz
-        version: file:../dist/expo-abcore-0.1.0.tgz(expo-modules-core@57.0.15(react-native@0.86.3(@babel/core@7.29.7)(@types/react@19.2.18)(react@19.2.3))(react@19.2.3))(expo@57.0.19)(react-native@0.86.3(@babel/core@7.29.7)(@types/react@19.2.18)(react@19.2.3))(react@19.2.3)
+        specifier: file:../dist/expo-abcore-0.1.1.tgz
+        version: file:../dist/expo-abcore-0.1.1.tgz(expo-modules-core@57.0.15(react-native@0.86.3(@babel/core@7.29.7)(@types/react@19.2.18)(react@19.2.3))(react@19.2.3))(expo@57.0.19)(react-native@0.86.3(@babel/core@7.29.7)(@types/react@19.2.18)(react@19.2.3))(react@19.2.3)
       expo-status-bar:
         specifier: ~57.0.1
         version: 57.0.1(expo@57.0.19)(react-native@0.86.3(@babel/core@7.29.7)(@types/react@19.2.18)(react@19.2.3))(react@19.2.3)
@@ -1023,9 +1023,9 @@ packages:
     resolution: {integrity: sha512-i/2XbnSz/uxRCU6+NdVJgKWDTM427+MqYbkQzD321DuCQJUqOuJKIA0IM2+W2xtYHdKOmZ4dR6fExsd4SXL+WQ==}
     engines: {node: '>=6'}
 
-  expo-abcore@file:../dist/expo-abcore-0.1.0.tgz:
-    resolution: {integrity: sha512-v3GmsavOXgXBB2X7/hM+hiDrA1LLZz+UawWKy6Qw7dqa+/EcTF/TfX1db+hWTbempng5wejcz6LMqQTvROBWVA==, tarball: file:../dist/expo-abcore-0.1.0.tgz}
-    version: 0.1.0
+  expo-abcore@file:../dist/expo-abcore-0.1.1.tgz:
+    resolution: {integrity: sha512-my+ouc16kmWz51sWpmvfJF+W+XwIgqMWy6fKo0N2O21U7BzA1hjcNQ9dmkhaz3BSe6I4al5S0p+iPfut/N2+7A==, tarball: file:../dist/expo-abcore-0.1.1.tgz}
+    version: 0.1.1
     peerDependencies:
       expo: ^57.0.0
       expo-modules-core: ^57.0.0
@@ -3403,7 +3403,7 @@ snapshots:
 
   event-target-shim@5.0.1: {}
 
-  expo-abcore@file:../dist/expo-abcore-0.1.0.tgz(expo-modules-core@57.0.15(react-native@0.86.3(@babel/core@7.29.7)(@types/react@19.2.18)(react@19.2.3))(react@19.2.3))(expo@57.0.19)(react-native@0.86.3(@babel/core@7.29.7)(@types/react@19.2.18)(react@19.2.3))(react@19.2.3):
+  expo-abcore@file:../dist/expo-abcore-0.1.1.tgz(expo-modules-core@57.0.15(react-native@0.86.3(@babel/core@7.29.7)(@types/react@19.2.18)(react@19.2.3))(react@19.2.3))(expo@57.0.19)(react-native@0.86.3(@babel/core@7.29.7)(@types/react@19.2.18)(react@19.2.3))(react@19.2.3):
     dependencies:
       expo: 57.0.19(@babel/core@7.29.7)(@expo/dom-webview@57.0.1)(react-native@0.86.3(@babel/core@7.29.7)(@types/react@19.2.18)(react@19.2.3))(react@19.2.3)(typescript@6.0.3)
       expo-modules-core: 57.0.15(react-native@0.86.3(@babel/core@7.29.7)(@types/react@19.2.18)(react@19.2.3))(react@19.2.3)

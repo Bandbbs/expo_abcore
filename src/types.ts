@@ -54,6 +54,7 @@ export type DeviceProfileInput = Omit<
 > & {
   id?: string;
   authKey?: string;
+  authKeyRecordId?: string;
   openId?: string;
 };
 
@@ -148,3 +149,8 @@ export type RuntimeLicense = {
   licenseText?: string;
   source: 'project' | 'javascript' | 'rust' | 'android' | 'ios';
 };
+
+export type AuthKeyRecord = { id: string; name: string; platform: 'android' | 'ios' };
+export type DeviceResourceAction = 'listWatchfaces' | 'listApps' | 'setWatchface' | 'removeWatchface' | 'launchApp' | 'removeApp';
+export type DeviceWatchface = { id: string; name: string; isCurrent: boolean; canRemove?: boolean };
+export type DeviceApp = { packageName: string; appName: string; versionCode?: number; canRemove?: boolean };

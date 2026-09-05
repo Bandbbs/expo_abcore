@@ -51,6 +51,10 @@ public final class ExpoABCoreModule: Module {
       expo_abcore_clear_callbacks()
     }
 
+    AsyncFunction("configureConnectionNotification") { (_: [String: String]) in
+      // iOS connection notifications are presented by the host notification center.
+    }
+
     AsyncFunction("requestPermissions") { () -> [String: Any] in
       let authorization = transport.waitForAuthorization()
       return [
@@ -87,6 +91,7 @@ public final class ExpoABCoreModule: Module {
       profile["preferredTransport"] = "ble"
       profile["sarVersion"] = profile["sarVersion"] ?? 2
       profile["txWinOverrunAllowance"] = profile["txWinOverrunAllowance"] ?? 2
+      try self.resolveAuthKeyRecord(&profile)
       try self.validate(profile)
       var values = self.profiles()
       if let index = values.firstIndex(where: { $0["id"] as? String == profile["id"] as? String }) {
@@ -109,6 +114,7 @@ public final class ExpoABCoreModule: Module {
       }
       var next = values[index]
       patch.forEach { next[$0.key] = $0.value }
+      try self.resolveAuthKeyRecord(&next)
       next = self.mergeSecrets(previous: values[index], next: next)
       try self.validate(next)
       values[index] = next
@@ -139,6 +145,36 @@ public final class ExpoABCoreModule: Module {
 
     AsyncFunction("refreshDeviceSnapshot") { () throws -> [String: Any] in
       try self.refreshSnapshot()
+    }
+
+    AsyncFunction("listAuthKeyRecords") { () -> [[String: Any]] in
+      self.authKeyRecords().map(self.publicAuthKeyRecord)
+    }
+
+    AsyncFunction("extractAuthKeys") {
+      (input: [String: Any], platform: String) throws -> [[String: Any]] in
+      try self.withLocalFile(input) { url in
+        guard let pairs = try self.runtime.call("extractAuthKeys", ["path": url.path, "platform": platform]) as? [[String: Any]] else {
+          throw ModuleError("INVALID_LOG", "Unable to extract device keys")
+        }
+        let records = pairs.map { pair in
+          var record = pair
+          record["id"] = UUID().uuidString
+          return record
+        }
+        let data = try JSONSerialization.data(withJSONObject: records)
+        try self.store.set(String(decoding: data, as: UTF8.self), for: "auth_key_records_v1")
+        return records.map(self.publicAuthKeyRecord)
+      }
+    }
+
+    AsyncFunction("deviceResource") {
+      (profileId: String, action: String, id: String?) throws -> Any? in
+      try self.ensureNotInstalling()
+      guard self.activeProfileId == profileId, let address = self.activeAddress else {
+        throw ModuleError("DEVICE_DISCONNECTED", "Connected device changed")
+      }
+      return try self.runtime.call("resource", ["address": address, "action": action, "id": id ?? ""])
     }
 
     AsyncFunction("classifyInstallFile") {
@@ -293,6 +329,23 @@ public final class ExpoABCoreModule: Module {
     if kind == "vivo", ((profile["openId"] as? String) ?? "").isEmpty {
       throw ModuleError("INVALID_PROFILE", "Vivo openId is required")
     }
+  }
+
+  private func authKeyRecords() -> [[String: Any]] {
+    let raw = store.string(for: "auth_key_records_v1", fallback: "[]")
+    return (try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [[String: Any]]) ?? []
+  }
+
+  private func publicAuthKeyRecord(_ value: [String: Any]) -> [String: Any] {
+    ["id": value["id"] ?? "", "name": value["name"] ?? "", "platform": value["platform"] ?? ""]
+  }
+
+  private func resolveAuthKeyRecord(_ profile: inout [String: Any]) throws {
+    guard let id = profile.removeValue(forKey: "authKeyRecordId") as? String, !id.isEmpty else { return }
+    guard let record = authKeyRecords().first(where: { $0["id"] as? String == id }) else {
+      throw ModuleError("KEY_RECORD_NOT_FOUND", "Saved key record no longer exists")
+    }
+    profile["authKey"] = record["authKey"]
   }
 
   private func mergeSecrets(

@@ -1,6 +1,6 @@
 {
   "name": "expo-abcore",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Expo native module for AstroBox wearable connectivity and installation.",
   "main": "src/index.ts",
   "types": "src/index.ts",
@@ -10,6 +10,7 @@
     "plugin",
     "src",
     "LICENSE",
+    "licenses",
     "ADDITIONAL-TERMS.md",
     "LINKING-EXCEPTION.md",
     "AUTHORIZED_HOSTS.md",

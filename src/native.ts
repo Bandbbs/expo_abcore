@@ -1,6 +1,8 @@
 import { requireNativeModule } from 'expo-modules-core';
 
 import type {
+  AuthKeyRecord,
+  DeviceResourceAction,
   DeviceProfile,
   DeviceProfileInput,
   DeviceProfilePatch,
@@ -16,6 +18,7 @@ import type {
 } from './types';
 
 export type ExpoABCoreNativeModule = {
+  configureConnectionNotification(options: { url: string; channelName: string; connectedLabel: string }): Promise<void>;
   requestPermissions(): Promise<
     PermissionState | { status?: string; granted?: boolean; canAskAgain?: boolean }
   >;
@@ -29,6 +32,9 @@ export type ExpoABCoreNativeModule = {
   disconnect(): Promise<void>;
   getDeviceSnapshot(id?: string): Promise<DeviceSnapshot | null>;
   refreshDeviceSnapshot(): Promise<DeviceSnapshot>;
+  listAuthKeyRecords(): Promise<AuthKeyRecord[]>;
+  extractAuthKeys(input: LocalFile, platform: 'android' | 'ios'): Promise<AuthKeyRecord[]>;
+  deviceResource(profileId: string, action: DeviceResourceAction, id?: string): Promise<unknown>;
   classifyInstallFile(input: LocalFile): Promise<InstallCandidate | null>;
   executeInstall(job: InstallJob): Promise<void>;
   loadInstallJobs(): Promise<InstallJob[]>;

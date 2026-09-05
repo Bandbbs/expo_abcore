@@ -30,6 +30,7 @@ class ExpoABCoreModule : Module(), RustBridge.Callbacks {
   private lateinit var store: SecureJsonStore
   private lateinit var transport: BluetoothTransport
   private lateinit var bridge: RustBridge
+  private var notificationOptions: Map<String, String> = emptyMap()
   private var scanJob: Job? = null
   private var activeProfileId: String? = null
   private var activeKind: String? = null
@@ -69,6 +70,7 @@ class ExpoABCoreModule : Module(), RustBridge.Callbacks {
     }
 
     OnDestroy {
+      appContext.reactContext?.let { ConnectionService.hide(it) }
       scanJob?.cancel()
       runCatching { bridge.call("disconnect") }
       transport.stopScan()
@@ -77,6 +79,10 @@ class ExpoABCoreModule : Module(), RustBridge.Callbacks {
       transport.disconnectBle()
       bridge.close()
       scope.coroutineContext[Job]?.cancel()
+    }
+
+    AsyncFunction("configureConnectionNotification") { options: Map<String, String> ->
+      notificationOptions = options
     }
 
     AsyncFunction("requestPermissions") { promise: Promise ->
@@ -101,6 +107,7 @@ class ExpoABCoreModule : Module(), RustBridge.Callbacks {
           val requestedKind = options?.get("kind") as? String
           if (transportFilter == null || transportFilter == "ble") {
             transport.getBleScannedDevices().forEach { device ->
+              if (device.name.isNullOrBlank()) return@forEach
               val kind = device.kind
               val key = "ble:${device.address}"
               if ((requestedKind == null || requestedKind == kind) && emitted.add(key)) {
@@ -123,6 +130,7 @@ class ExpoABCoreModule : Module(), RustBridge.Callbacks {
           if (transportFilter == null || transportFilter == "spp") {
             transport.getScannedDevices().forEach { device ->
               val name = runCatching { device.name }.getOrNull()
+              if (name.isNullOrBlank()) return@forEach
               if (kindForName(name) == "vivo") return@forEach
               val kind = "xiaomi"
               val key = "spp:${device.address}"
@@ -159,6 +167,7 @@ class ExpoABCoreModule : Module(), RustBridge.Callbacks {
           optInt("txWinOverrunAllowance", if (Build.VERSION.SDK_INT > 0) 6 else 2),
         )
       }
+      resolveAuthKeyRecord(profile)
       validateProfile(profile)
       val list = profiles()
       val index = list.indexOfFirst { it.optString("id") == profile.optString("id") }
@@ -181,6 +190,7 @@ class ExpoABCoreModule : Module(), RustBridge.Callbacks {
       if (index < 0) throw ExpoABCoreException("PROFILE_NOT_FOUND", "Device profile not found")
       val next = JSONObject(list[index].toString())
       mapToJson(patch).keys().forEach { key -> next.put(key, mapToJson(patch).get(key)) }
+      resolveAuthKeyRecord(next)
       list[index] = mergeSecretFields(list[index], next)
       validateProfile(list[index])
       saveProfiles(list)
@@ -216,6 +226,32 @@ class ExpoABCoreModule : Module(), RustBridge.Callbacks {
 
     AsyncFunction("refreshDeviceSnapshot") {
       runBlocking(Dispatchers.IO) { refreshSnapshot() }
+    }
+
+    AsyncFunction("listAuthKeyRecords") {
+      authKeyRecords().map(::publicAuthKeyRecord)
+    }
+
+    AsyncFunction("extractAuthKeys") { input: Map<String, Any?>, platform: String ->
+      withStagedFile(input) { file ->
+        val pairs = bridge.call("extractAuthKeys", JSONObject().put("path", file.path).put("platform", platform)) as JSONArray
+        val records = (0 until pairs.length()).map { index ->
+          pairs.getJSONObject(index).put("id", UUID.randomUUID().toString())
+        }
+        store.set("auth_key_records_v1", JSONArray(records).toString())
+        records.map(::publicAuthKeyRecord)
+      }
+    }
+
+    AsyncFunction("deviceResource") { profileId: String, action: String, id: String? ->
+      ensureNotInstalling()
+      if (activeProfileId != profileId) throw ExpoABCoreException("DEVICE_DISCONNECTED", "Connected device changed")
+      val value = bridge.call("resource", JSONObject().put("address", activeAddress).put("action", action).put("id", id ?: ""))
+      when (value) {
+        is JSONArray -> value.toListValue()
+        is JSONObject -> value.toMap()
+        else -> null
+      }
     }
 
     AsyncFunction("classifyInstallFile") { input: Map<String, Any?> ->
@@ -345,6 +381,7 @@ class ExpoABCoreModule : Module(), RustBridge.Callbacks {
   }
 
   private fun disconnectNow() {
+    appContext.reactContext?.let { ConnectionService.hide(it) }
     runCatching { bridge.call("disconnect") }
     transport.disconnect()
     transport.disconnectBle()
@@ -366,8 +403,21 @@ class ExpoABCoreModule : Module(), RustBridge.Callbacks {
       JSONObject().put("address", profile.getString("address")),
     ) as? JSONObject ?: JSONObject()
     val result = snapshot(profile, "connected", data = data)
+    updateConnectionNotification(profile, data)
     sendEvent("deviceSnapshotChanged", result)
     return result
+  }
+
+  private fun updateConnectionNotification(profile: JSONObject, data: JSONObject) {
+    val context = appContext.reactContext ?: return
+    val url = notificationOptions["url"] ?: return
+    val battery = data.optJSONObject("status")?.optJSONObject("battery")?.optInt("capacity", -1) ?: -1
+    val status = notificationOptions["connectedLabel"] ?: "Connected"
+    runCatching {
+      ConnectionService.show(context, profile.getString("name"),
+        if (battery >= 0) "$status · $battery%" else status,
+        url, notificationOptions["channelName"] ?: "Connected device")
+    }.onFailure { android.util.Log.w("ExpoABCore", "Unable to show connection notification") }
   }
 
   private fun profiles(): MutableList<JSONObject> {
@@ -431,6 +481,25 @@ class ExpoABCoreModule : Module(), RustBridge.Callbacks {
     }
   }
 
+  private fun authKeyRecords(): List<JSONObject> {
+    val values = JSONArray(store.get("auth_key_records_v1", "[]"))
+    return (0 until values.length()).map { values.getJSONObject(it) }
+  }
+
+  private fun publicAuthKeyRecord(value: JSONObject): Map<String, Any?> = mapOf(
+    "id" to value.getString("id"), "name" to value.getString("name"),
+    "platform" to value.getString("platform"),
+  )
+
+  private fun resolveAuthKeyRecord(profile: JSONObject) {
+    val id = profile.optString("authKeyRecordId")
+    profile.remove("authKeyRecordId")
+    if (id.isBlank()) return
+    val record = authKeyRecords().firstOrNull { it.optString("id") == id }
+      ?: throw ExpoABCoreException("KEY_RECORD_NOT_FOUND", "Saved key record no longer exists")
+    profile.put("authKey", record.getString("authKey"))
+  }
+
   private fun mergeSecretFields(previous: JSONObject, next: JSONObject): JSONObject {
     if (next.optString("authKey").isBlank() && previous.optString("authKey").isNotBlank()) {
       next.put("authKey", previous.getString("authKey"))
@@ -483,6 +552,7 @@ class ExpoABCoreModule : Module(), RustBridge.Callbacks {
   }
 
   private fun emitConnectionFailure(code: String, message: String) {
+    appContext.reactContext?.let { ConnectionService.hide(it) }
     val profile = profiles().firstOrNull { it.optString("id") == activeProfileId } ?: return
     runCatching { bridge.call("disconnect") }
     transport.disconnect()

@@ -3,6 +3,10 @@ import { InstallQueueController } from './queue';
 import { Platform } from 'react-native';
 
 import type {
+  AuthKeyRecord,
+  DeviceWatchface,
+  DeviceApp,
+  DeviceResourceAction,
   DeviceProfile,
   DeviceProfileInput,
   DeviceProfilePatch,
@@ -141,4 +145,32 @@ export function addExpoABCoreListener<K extends keyof ExpoABCoreEventMap>(
   listener: (event: ExpoABCoreEventMap[K]) => void,
 ): Subscription {
   return ExpoABCoreNative.addListener(eventName, listener);
+}
+
+export function listAuthKeyRecords(): Promise<AuthKeyRecord[]> {
+  return ExpoABCoreNative.listAuthKeyRecords();
+}
+
+export function extractAuthKeys(input: LocalFile, platform: 'android' | 'ios'): Promise<AuthKeyRecord[]> {
+  return ExpoABCoreNative.extractAuthKeys(input, platform);
+}
+
+export async function listDeviceWatchfaces(profileId: string): Promise<DeviceWatchface[]> {
+  return await ExpoABCoreNative.deviceResource(profileId, 'listWatchfaces') as DeviceWatchface[];
+}
+
+export async function listDeviceApps(profileId: string): Promise<DeviceApp[]> {
+  return await ExpoABCoreNative.deviceResource(profileId, 'listApps') as DeviceApp[];
+}
+
+export async function performDeviceResourceAction(
+  profileId: string,
+  action: Exclude<DeviceResourceAction, 'listWatchfaces' | 'listApps'>,
+  id: string,
+): Promise<void> {
+  await ExpoABCoreNative.deviceResource(profileId, action, id);
+}
+
+export function configureConnectionNotification(options: { url: string; channelName: string; connectedLabel: string }): Promise<void> {
+  return ExpoABCoreNative.configureConnectionNotification(options);
 }

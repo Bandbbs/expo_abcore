@@ -20,11 +20,10 @@ async function sha256(path) {
   return hash.digest('hex');
 }
 
-rmSync(dist, { recursive: true, force: true });
 mkdirSync(dist, { recursive: true });
 run('pnpm', ['pack', '--pack-destination', dist]);
 
-const packed = readdirSync(dist).find((name) => name.endsWith('.tgz'));
+const packed = readdirSync(dist).find((name) => name === `expo-abcore-${version}.tgz`);
 if (!packed) throw new Error('pnpm pack did not create a tarball');
 const releasePackage = `expo-abcore-${version}.tgz`;
 if (packed !== releasePackage) renameSync(join(dist, packed), join(dist, releasePackage));

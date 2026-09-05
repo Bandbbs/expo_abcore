@@ -53,3 +53,32 @@ release workflow stops before checkout when that approval record is absent.
 AstroBox-NG: https://github.com/AstralSightStudios/AstroBox-NG
 
 Copyright (C) 2025-2026 AstralSight Studios and contributors.
+
+### Device resources and Mi Fitness credentials
+
+`listDeviceWatchfaces(profileId)` and `listDeviceApps(profileId)` read the connected device.
+`performDeviceResourceAction(profileId, action, id)` supports `setWatchface`,
+`removeWatchface`, `launchApp`, and `removeApp`. Actions reject a changed connection
+or an active installation. Vivo app launch is not implemented by the upstream core.
+Xiaomi mutation commands are dispatched without a device acknowledgement; refresh
+the resource list to observe the device result.
+
+`extractAuthKeys(file, platform)` accepts an Android Mi Fitness log ZIP or an iOS
+`manifest.sqlite` (`platform: 'android' | 'ios'`). It replaces the last extraction
+records in Android Keystore encrypted storage or iOS Keychain and returns only
+`{ id, name, platform }`. `listAuthKeyRecords()` returns the same public metadata.
+Pass `authKeyRecordId` when saving or updating a Xiaomi profile to resolve the secret
+inside native code. Neither API returns the extracted key to JavaScript. Input and
+log expansion are limited to 64 MiB; no ZIP entries are extracted to disk.
+The parser is adapted from the MIT MiFitnessLogReader, with its license included in
+runtime notices. Test fixtures contain synthetic credentials only.
+
+`configureConnectionNotification({ url, channelName, connectedLabel })` configures
+the Android connected-device foreground service. Call it during host startup. The
+host requests notification permission; the service shows device name, connection
+state and available battery percentage, opens the supplied app URL, and stops on
+disconnect. iOS notification presentation remains the host's responsibility.
+
+For development across the two repositories, Bandbbs can consume the locally built
+`dist/expo-abcore-0.1.1.tgz`. Build native libraries with `pnpm build:rust`, then run
+`pnpm package:release` and `pnpm verify:release`. Publishing is a separate step.

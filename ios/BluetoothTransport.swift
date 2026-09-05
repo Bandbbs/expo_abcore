@@ -136,9 +136,10 @@ final class BluetoothTransport: NSObject, CBCentralManagerDelegate, CBPeripheral
   ) {
     let name = (advertisementData[CBAdvertisementDataLocalNameKey] as? String)
       ?? peripheral.name
-      ?? peripheral.identifier.uuidString
+      ?? ""
     let services = advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] ?? []
     let manufacturer = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data
+    guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
     let kind = classify(name: name, services: services, manufacturer: manufacturer)
     guard let kind else { return }
     peripherals[peripheral.identifier] = peripheral

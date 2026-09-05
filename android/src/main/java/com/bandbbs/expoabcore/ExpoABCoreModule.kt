@@ -277,6 +277,7 @@ class ExpoABCoreModule : Module(), RustBridge.Callbacks {
             .put("address", profile.getString("address"))
             .put("path", file.path)
           bridge.call("install", request)
+          Unit
         }
       } finally {
         installing.set(false)

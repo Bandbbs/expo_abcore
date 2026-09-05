@@ -1024,7 +1024,7 @@ packages:
     engines: {node: '>=6'}
 
   expo-abcore@file:../dist/expo-abcore-0.1.1.tgz:
-    resolution: {integrity: sha512-my+ouc16kmWz51sWpmvfJF+W+XwIgqMWy6fKo0N2O21U7BzA1hjcNQ9dmkhaz3BSe6I4al5S0p+iPfut/N2+7A==, tarball: file:../dist/expo-abcore-0.1.1.tgz}
+    resolution: {integrity: sha512-vYK3qwLalHqlIXmVs6p0+g6IfOoH12I1LI5gtiLPgMwgSPqccUZRDEBIpnnlB1PFUccNTIN7GiYV15u8xKdg5Q==, tarball: file:../dist/expo-abcore-0.1.1.tgz}
     version: 0.1.1
     peerDependencies:
       expo: ^57.0.0

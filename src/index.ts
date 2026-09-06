@@ -2,6 +2,7 @@ import { ExpoABCoreNative } from './native';
 import { InstallQueueController } from './queue';
 import { Platform } from 'react-native';
 
+import { normalizePermissionState } from './types';
 import type {
   AuthKeyRecord,
   DeviceWatchface,
@@ -22,7 +23,7 @@ import type {
   Subscription,
 } from './types';
 
-export * from './types';
+export type * from './types';
 export { InstallQueueController } from './queue';
 
 const installQueue = new InstallQueueController({
@@ -37,19 +38,7 @@ const installQueue = new InstallQueueController({
 export async function requestPermissions(): Promise<PermissionState> {
   const result = await ExpoABCoreNative.requestPermissions();
   if ('bluetooth' in result) return result;
-  const granted = result.granted === true || result.status === 'granted';
-  const undetermined = result.status === 'undetermined';
-  return {
-    bluetooth: granted ? 'granted' : undetermined ? 'undetermined' : 'denied',
-    location: Platform.OS === 'ios'
-      ? 'notRequired'
-      : granted
-        ? 'granted'
-        : undetermined
-          ? 'notRequired'
-          : 'denied',
-    canAskAgain: result.canAskAgain !== false,
-  };
+  return normalizePermissionState(result, Platform);
 }
 
 export function startScan(options?: ScanOptions): Promise<void> {

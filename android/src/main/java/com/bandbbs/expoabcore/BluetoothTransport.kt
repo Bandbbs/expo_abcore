@@ -76,8 +76,14 @@ class BluetoothTransport(
     @Volatile private var pendingStartupPermissionCheck: Boolean = false
 
     private val adapter: BluetoothAdapter? = BluetoothAdapter.getDefaultAdapter()
+    private val scannedDevicesLock = Any()
     private val scannedDevices = mutableListOf<BluetoothDevice>()
     data class BleScannedDevice(val name: String?, val address: String, val kind: String)
+    data class ScanStartResult(
+        val started: Boolean,
+        val errorCode: String? = null,
+        val errorMessage: String? = null,
+    )
     private data class VivoAdvertisementInfo(
         val protocolVersion: Int,
         val mask: Int,
@@ -86,8 +92,9 @@ class BluetoothTransport(
     )
     private val bleScannedDevices = mutableListOf<BleScannedDevice>()
     private val bleDeviceCache = mutableMapOf<String, BluetoothDevice>()
-    private var bleScanCallback: ScanCallback? = null
+    @Volatile private var bleScanCallback: ScanCallback? = null
     private var classicScanReceiverRegistered = false
+    @Volatile private var scanFailureListener: ((source: String, code: String, message: String) -> Unit)? = null
 
     private var socket: BluetoothSocket? = null
     private var inStream: InputStream? = null
@@ -119,7 +126,6 @@ class BluetoothTransport(
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> arrayOf(
                 Manifest.permission.BLUETOOTH_SCAN,
                 Manifest.permission.BLUETOOTH_CONNECT,
-                Manifest.permission.ACCESS_FINE_LOCATION,
             )
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q -> arrayOf(
                 Manifest.permission.ACCESS_FINE_LOCATION,
@@ -140,6 +146,7 @@ class BluetoothTransport(
     }
 
     private fun hasPreciseLocationPermission(activity: Activity): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) return true
         return ContextCompat.checkSelfPermission(
             activity,
             Manifest.permission.ACCESS_FINE_LOCATION,
@@ -171,6 +178,7 @@ class BluetoothTransport(
 
     private fun showPreciseLocationRequiredDialogIfNeeded() {
         val activity = context as? Activity ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) return
         if (hasPreciseLocationPermission(activity)) return
         val now = System.currentTimeMillis()
         if (now - lastPreciseLocationDialogAtMs < PRECISE_LOCATION_DIALOG_COOLDOWN_MS) {
@@ -214,11 +222,14 @@ class BluetoothTransport(
 
     private fun missingPermissionsMessage(): String {
         val activity = context as? Activity ?: return PRECISE_LOCATION_REQUIRED_MESSAGE
-        if (!hasPreciseLocationPermission(activity)) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S && !hasPreciseLocationPermission(activity)) {
             return PRECISE_LOCATION_REQUIRED_MESSAGE
         }
         val missing = missingRuntimePermissions(activity)
-        if (missing.isEmpty()) return PRECISE_LOCATION_REQUIRED_MESSAGE
+        if (missing.isEmpty()) return "Bluetooth permissions are required"
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            return "Nearby devices permission is required"
+        }
         return "Missing permissions: ${missing.joinToString(", ")}"
     }
 
@@ -229,7 +240,9 @@ class BluetoothTransport(
     private var dataListener: DataListener? = null
     private var onConnectedCallback: (() -> Unit)? = null
 
-    fun getScannedDevices(): List<BluetoothDevice> = scannedDevices.toList()
+    fun getScannedDevices(): List<BluetoothDevice> = synchronized(scannedDevicesLock) {
+        scannedDevices.toList()
+    }
     fun getConnectedDeviceInfo(): BluetoothDevice? = connectedDevice
     fun getMaxSendLen(): Int? = if (connectedDevice != null) STREAM_WRITE_HINT else null
     fun getBleScannedDevices(): List<BleScannedDevice> = synchronized(bleScannedDevices) {
@@ -241,6 +254,10 @@ class BluetoothTransport(
         return (bleMtu - 3).coerceAtLeast(20)
     }
     fun setDataListener(listener: DataListener) { dataListener = listener }
+
+    fun setScanFailureListener(listener: ((source: String, code: String, message: String) -> Unit)?) {
+        scanFailureListener = listener
+    }
 
     fun initPermissions() {
         pendingStartupPermissionCheck = !ensureRuntimePermissions(requestIfMissing = true)
@@ -340,14 +357,30 @@ class BluetoothTransport(
     }
 
     @SuppressLint("MissingPermission")
-    fun startScan() {
+    fun startScan(): ScanStartResult {
         if (!ensureRuntimePermissions(requestIfMissing = false)) {
             showPreciseLocationRequiredDialogIfNeeded()
-            return
+            return ScanStartResult(
+                started = false,
+                errorCode = "PERMISSION_DENIED",
+                errorMessage = missingPermissionsMessage(),
+            )
         }
-        scannedDevices.clear()
+        val bt = adapter ?: return ScanStartResult(
+            started = false,
+            errorCode = "BLUETOOTH_UNAVAILABLE",
+            errorMessage = "Bluetooth adapter is unavailable",
+        )
+        if (!runCatching { bt.isEnabled }.getOrDefault(false)) {
+            return ScanStartResult(
+                started = false,
+                errorCode = "BLUETOOTH_OFF",
+                errorMessage = "Bluetooth is turned off",
+            )
+        }
+        synchronized(scannedDevicesLock) { scannedDevices.clear() }
         stopScan()
-        adapter?.let { bt ->
+        return try {
             val filter = IntentFilter(BluetoothDevice.ACTION_FOUND)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 context.registerReceiver(scanReceiver, filter, RECEIVER_EXPORTED)
@@ -355,13 +388,36 @@ class BluetoothTransport(
                 context.registerReceiver(scanReceiver, filter)
             }
             classicScanReceiverRegistered = true
-            bt.startDiscovery()
+            if (!bt.startDiscovery()) {
+                stopScan()
+                ScanStartResult(
+                    started = false,
+                    errorCode = "CLASSIC_SCAN_FAILED",
+                    errorMessage = "Bluetooth discovery could not be started",
+                )
+            } else {
+                ScanStartResult(started = true)
+            }
+        } catch (error: SecurityException) {
+            stopScan()
+            ScanStartResult(
+                started = false,
+                errorCode = "PERMISSION_DENIED",
+                errorMessage = error.message ?: missingPermissionsMessage(),
+            )
+        } catch (error: RuntimeException) {
+            stopScan()
+            ScanStartResult(
+                started = false,
+                errorCode = "CLASSIC_SCAN_FAILED",
+                errorMessage = error.message ?: "Bluetooth discovery failed",
+            )
         }
     }
 
     @SuppressLint("MissingPermission")
     fun stopScan() {
-        adapter?.cancelDiscovery()
+        runCatching { adapter?.cancelDiscovery() }
         if (classicScanReceiverRegistered) {
             try { context.unregisterReceiver(scanReceiver) } catch (_: IllegalArgumentException) {}
             classicScanReceiverRegistered = false
@@ -369,28 +425,53 @@ class BluetoothTransport(
     }
 
     @SuppressLint("MissingPermission")
-    fun startBleScan() {
+    fun startBleScan(): ScanStartResult {
         if (!ensureRuntimePermissions(requestIfMissing = false)) {
             showPreciseLocationRequiredDialogIfNeeded()
-            return
+            return ScanStartResult(
+                started = false,
+                errorCode = "PERMISSION_DENIED",
+                errorMessage = missingPermissionsMessage(),
+            )
         }
 
         stopBleScan()
         synchronized(bleScannedDevices) { bleScannedDevices.clear() }
         synchronized(bleDeviceCache) { bleDeviceCache.clear() }
 
-        val scanner = adapter?.bluetoothLeScanner ?: return
+        val scanner = try {
+            adapter?.bluetoothLeScanner
+        } catch (error: SecurityException) {
+            return ScanStartResult(
+                started = false,
+                errorCode = "PERMISSION_DENIED",
+                errorMessage = error.message ?: missingPermissionsMessage(),
+            )
+        } ?: return ScanStartResult(
+            started = false,
+            errorCode = "BLUETOOTH_UNAVAILABLE",
+            errorMessage = "Bluetooth LE scanner is unavailable",
+        )
         val callback = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
+                if (bleScanCallback !== this) return
                 rememberBleScanResult(result)
             }
 
             override fun onBatchScanResults(results: MutableList<ScanResult>) {
+                if (bleScanCallback !== this) return
                 results.forEach(::rememberBleScanResult)
             }
 
             override fun onScanFailed(errorCode: Int) {
-                uiHandler.post { logger("Kotlin BLE: scan failed code=$errorCode") }
+                if (bleScanCallback !== this) return
+                val message = "Bluetooth LE scan failed (code=$errorCode)"
+                uiHandler.post {
+                    if (bleScanCallback !== this) return@post
+                    bleScanCallback = null
+                    logger("Kotlin BLE: $message")
+                    scanFailureListener?.invoke("ble", "BLE_SCAN_FAILED", message)
+                }
             }
         }
 
@@ -398,7 +479,24 @@ class BluetoothTransport(
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
         bleScanCallback = callback
-        scanner.startScan(emptyList<ScanFilter>(), settings, callback)
+        return try {
+            scanner.startScan(emptyList<ScanFilter>(), settings, callback)
+            ScanStartResult(started = true)
+        } catch (error: SecurityException) {
+            bleScanCallback = null
+            ScanStartResult(
+                started = false,
+                errorCode = "PERMISSION_DENIED",
+                errorMessage = error.message ?: missingPermissionsMessage(),
+            )
+        } catch (error: RuntimeException) {
+            bleScanCallback = null
+            ScanStartResult(
+                started = false,
+                errorCode = "BLE_SCAN_FAILED",
+                errorMessage = error.message ?: "Bluetooth LE scan failed",
+            )
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -958,8 +1056,11 @@ class BluetoothTransport(
         override fun onReceive(ctx: Context?, intent: Intent) {
             if (intent.action == BluetoothDevice.ACTION_FOUND) {
                 (intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE) as? BluetoothDevice)
-                    ?.takeIf { !scannedDevices.contains(it) }
-                    ?.let(scannedDevices::add)
+                    ?.let { device ->
+                        synchronized(scannedDevicesLock) {
+                            if (!scannedDevices.contains(device)) scannedDevices.add(device)
+                        }
+                    }
             }
         }
     }

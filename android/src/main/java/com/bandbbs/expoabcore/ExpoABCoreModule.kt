@@ -15,6 +15,7 @@ import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -37,6 +38,7 @@ class ExpoABCoreModule : Module(), RustBridge.Callbacks {
   private var activeAddress: String? = null
   private var activeTransport: String? = null
   private val installing = AtomicBoolean(false)
+  private val activeScanSources = mutableSetOf<String>()
 
   override fun definition() = ModuleDefinition {
     Name("ExpoABCore")
@@ -66,6 +68,12 @@ class ExpoABCoreModule : Module(), RustBridge.Callbacks {
           emitConnectionFailure("DEVICE_DISCONNECTED", e.message ?: "Bluetooth disconnected")
         }
       })
+      transport.setScanFailureListener { source, code, message ->
+        val shouldStop = synchronized(activeScanSources) {
+          activeScanSources.remove(source) && activeScanSources.isEmpty()
+        }
+        if (shouldStop) stopScanning(code, message)
+      }
       bridge = RustBridge(this@ExpoABCoreModule)
     }
 
@@ -75,6 +83,7 @@ class ExpoABCoreModule : Module(), RustBridge.Callbacks {
       runCatching { bridge.call("disconnect") }
       transport.stopScan()
       transport.stopBleScan()
+      transport.setScanFailureListener(null)
       transport.disconnect()
       transport.disconnectBle()
       bridge.close()
@@ -98,56 +107,93 @@ class ExpoABCoreModule : Module(), RustBridge.Callbacks {
       ensurePermissions()
       val transportFilter = options?.get("transport") as? String
       stopScanning()
-      if (transportFilter == null || transportFilter == "ble") transport.startBleScan()
-      if (transportFilter == "spp") transport.startScan()
-      sendEvent("scanStateChanged", mapOf("scanning" to true))
-      val emitted = mutableSetOf<String>()
-      scanJob = scope.launch {
-        while (true) {
-          val requestedKind = options?.get("kind") as? String
-          if (transportFilter == null || transportFilter == "ble") {
-            transport.getBleScannedDevices().forEach { device ->
-              if (device.name.isNullOrBlank()) return@forEach
-              val kind = device.kind
-              val key = "ble:${device.address}"
-              if ((requestedKind == null || requestedKind == kind) && emitted.add(key)) {
-                sendEvent(
-                  "scanResult",
-                  mapOf(
-                    "name" to (device.name ?: device.address),
-                    "address" to device.address,
-                    "kind" to kind,
-                    "transports" to if (kind == "xiaomi") {
-                      listOf("ble", "spp")
-                    } else {
-                      listOf("ble")
-                    },
-                  ),
-                )
+      val wantsBle = transportFilter == null || transportFilter == "ble"
+      val wantsSpp = transportFilter == "spp"
+      val startedSources = mutableSetOf<String>()
+      synchronized(activeScanSources) { activeScanSources.clear() }
+      var failureCode: String? = null
+      var failureMessage: String? = null
+      if (wantsBle) {
+        val result = transport.startBleScan()
+        if (result.started) {
+          startedSources += "ble"
+          synchronized(activeScanSources) { activeScanSources.add("ble") }
+        } else if (failureCode == null) {
+          failureCode = result.errorCode
+          failureMessage = result.errorMessage
+        }
+      }
+      if (wantsSpp) {
+        val result = transport.startScan()
+        if (result.started) {
+          startedSources += "spp"
+          synchronized(activeScanSources) { activeScanSources.add("spp") }
+        } else if (failureCode == null) {
+          failureCode = result.errorCode
+          failureMessage = result.errorMessage
+        }
+      }
+      if (startedSources.isEmpty()) {
+        stopScanning(
+          failureCode ?: "BLUETOOTH_UNAVAILABLE",
+          failureMessage ?: "Bluetooth scan could not be started",
+        )
+      } else {
+        sendEvent("scanStateChanged", mapOf("scanning" to true))
+        val emitted = mutableSetOf<String>()
+        scanJob = scope.launch {
+          try {
+            while (true) {
+              val requestedKind = options?.get("kind") as? String
+              if (wantsBle) {
+                transport.getBleScannedDevices().forEach { device ->
+                  if (device.name.isNullOrBlank()) return@forEach
+                  val kind = device.kind
+                  val key = "ble:${device.address}"
+                  if ((requestedKind == null || requestedKind == kind) && emitted.add(key)) {
+                    sendEvent(
+                      "scanResult",
+                      mapOf(
+                        "name" to (device.name ?: device.address),
+                        "address" to device.address,
+                        "kind" to kind,
+                        "transports" to if (kind == "xiaomi") {
+                          listOf("ble", "spp")
+                        } else {
+                          listOf("ble")
+                        },
+                      ),
+                    )
+                  }
+                }
               }
-            }
-          }
-          if (transportFilter == null || transportFilter == "spp") {
-            transport.getScannedDevices().forEach { device ->
-              val name = runCatching { device.name }.getOrNull()
-              if (name.isNullOrBlank()) return@forEach
-              if (kindForName(name) == "vivo") return@forEach
-              val kind = "xiaomi"
-              val key = "spp:${device.address}"
-              if ((requestedKind == null || requestedKind == kind) && emitted.add(key)) {
-                sendEvent(
-                  "scanResult",
-                  mapOf(
-                    "name" to (name ?: device.address),
-                    "address" to device.address,
-                    "kind" to kind,
-                    "transports" to listOf("spp"),
-                  ),
-                )
+              if (wantsSpp) {
+                transport.getScannedDevices().forEach { device ->
+                  val name = runCatching { device.name }.getOrNull()
+                  if (name.isNullOrBlank()) return@forEach
+                  if (kindForName(name) == "vivo") return@forEach
+                  val kind = "xiaomi"
+                  val key = "spp:${device.address}"
+                  if ((requestedKind == null || requestedKind == kind) && emitted.add(key)) {
+                    sendEvent(
+                      "scanResult",
+                      mapOf(
+                        "name" to (name ?: device.address),
+                        "address" to device.address,
+                        "kind" to kind,
+                        "transports" to listOf("spp"),
+                      ),
+                    )
+                  }
+                }
               }
+              delay(350)
             }
+          } catch (error: CancellationException) {
+            throw error
+          } catch (error: Throwable) {
+            stopScanning("SCAN_POLL_FAILED", error.message ?: "Bluetooth scan polling failed")
           }
-          delay(350)
         }
       }
     }
@@ -514,19 +560,22 @@ class ExpoABCoreModule : Module(), RustBridge.Callbacks {
     return next
   }
 
-  private fun stopScanning() {
+  private fun stopScanning(errorCode: String? = null, errorMessage: String? = null) {
     scanJob?.cancel()
     scanJob = null
+    synchronized(activeScanSources) { activeScanSources.clear() }
     transport.stopScan()
     transport.stopBleScan()
-    sendEvent("scanStateChanged", mapOf("scanning" to false))
+    val payload = mutableMapOf<String, Any?>("scanning" to false)
+    if (errorCode != null) payload["errorCode"] = errorCode
+    if (errorMessage != null) payload["errorMessage"] = errorMessage
+    sendEvent("scanStateChanged", payload)
   }
 
   private fun runtimePermissions(): Array<String> = when {
     Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> arrayOf(
       Manifest.permission.BLUETOOTH_SCAN,
       Manifest.permission.BLUETOOTH_CONNECT,
-      Manifest.permission.ACCESS_FINE_LOCATION,
     )
     Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q -> arrayOf(
       Manifest.permission.ACCESS_FINE_LOCATION,
@@ -541,7 +590,13 @@ class ExpoABCoreModule : Module(), RustBridge.Callbacks {
       }) {
       throw ExpoABCoreException(
         "PERMISSION_DENIED",
-        "Bluetooth and precise location permissions are required",
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+          "Nearby devices permission is required"
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+          "Bluetooth and precise location permissions are required"
+        } else {
+          "Bluetooth and approximate location permissions are required"
+        },
       )
     }
   }

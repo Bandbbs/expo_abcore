@@ -43,20 +43,28 @@ function withExpoABCore(config, options = {}) {
     });
     next.modResults.manifest['uses-permission'] = permissions;
     for (const entry of permissions) {
+      entry.$ ||= {};
       const name = entry.$?.['android:name'];
       if (
         name === 'android.permission.BLUETOOTH' ||
         name === 'android.permission.BLUETOOTH_ADMIN'
       ) {
         entry.$['android:maxSdkVersion'] = '30';
+        delete entry.$['android:usesPermissionFlags'];
       }
       if (
         name === 'android.permission.ACCESS_COARSE_LOCATION' ||
         name === 'android.permission.ACCESS_FINE_LOCATION'
       ) {
-        delete entry.$['android:maxSdkVersion'];
+        entry.$['android:maxSdkVersion'] = '30';
+        delete entry.$['android:usesPermissionFlags'];
       }
       if (name === 'android.permission.BLUETOOTH_SCAN') {
+        delete entry.$['android:maxSdkVersion'];
+        entry.$['android:usesPermissionFlags'] = 'neverForLocation';
+      }
+      if (name === 'android.permission.BLUETOOTH_CONNECT') {
+        delete entry.$['android:maxSdkVersion'];
         delete entry.$['android:usesPermissionFlags'];
       }
     }

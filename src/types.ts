@@ -23,6 +23,38 @@ export type PermissionState = {
   canAskAgain: boolean;
 };
 
+type NativePermissionResult = {
+  status?: string;
+  granted?: boolean;
+  canAskAgain?: boolean;
+};
+
+type PermissionPlatform = {
+  OS: string;
+  Version?: string | number;
+};
+
+export function normalizePermissionState(
+  result: NativePermissionResult,
+  platform: PermissionPlatform,
+): PermissionState {
+  const granted = result.granted === true || result.status === 'granted';
+  const undetermined = result.status === 'undetermined';
+  const androidLocationRequired =
+    platform.OS === 'android' && Number(platform.Version) < 31;
+  return {
+    bluetooth: granted ? 'granted' : undetermined ? 'undetermined' : 'denied',
+    location: platform.OS === 'ios' || !androidLocationRequired
+      ? 'notRequired'
+      : granted
+        ? 'granted'
+        : undetermined
+          ? 'notRequired'
+          : 'denied',
+    canAskAgain: result.canAskAgain !== false,
+  };
+}
+
 export type ScanOptions = {
   kind?: DeviceKind;
   transport?: Transport;

@@ -5,6 +5,7 @@ import { resolve } from 'node:path';
 const root = resolve(import.meta.dirname, '..');
 const read = (path) => readFileSync(resolve(root, path), 'utf8');
 const androidModule = read('android/src/main/java/com/bandbbs/expoabcore/ExpoABCoreModule.kt');
+const androidTransport = read('android/src/main/java/com/bandbbs/expoabcore/BluetoothTransport.kt');
 const androidStore = read('android/src/main/java/com/bandbbs/expoabcore/SecureJsonStore.kt');
 const androidManifest = read('android/src/main/AndroidManifest.xml');
 const iosModule = read('ios/ExpoABCoreModule.swift');
@@ -42,7 +43,41 @@ for (const permission of [
   assert.match(plugin, new RegExp(`android.permission.${permission}`));
 }
 assert.match(plugin, /android:maxSdkVersion/);
-assert.doesNotMatch(plugin, /neverForLocation/);
+assert.match(plugin, /neverForLocation/);
+assert.match(androidManifest, /android:name="android\.permission\.ACCESS_COARSE_LOCATION" android:maxSdkVersion="30"/);
+assert.match(androidManifest, /android:name="android\.permission\.ACCESS_FINE_LOCATION" android:maxSdkVersion="30"/);
+assert.match(androidManifest, /android:name="android\.permission\.BLUETOOTH_SCAN"[\s\S]*android:usesPermissionFlags="neverForLocation"/);
+assert.match(
+  androidModule,
+  /Build\.VERSION\.SDK_INT >= Build\.VERSION_CODES\.S -> arrayOf\([\s\S]*Manifest\.permission\.BLUETOOTH_SCAN,[\s\S]*Manifest\.permission\.BLUETOOTH_CONNECT,[\s\S]*\)/,
+);
+const androidRuntimePermissionStart = androidModule.indexOf(
+  'Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> arrayOf(',
+);
+const androidRuntimePermissionEnd = androidModule.indexOf(
+  'Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q -> arrayOf(',
+  androidRuntimePermissionStart,
+);
+const androidRuntimeSBlock = androidModule.slice(
+  androidRuntimePermissionStart,
+  androidRuntimePermissionEnd,
+);
+assert.doesNotMatch(
+  androidRuntimeSBlock,
+  /Manifest\.permission\.ACCESS_FINE_LOCATION/,
+);
+assert.match(androidTransport, /onScanFailed\(errorCode: Int\)/);
+assert.match(androidTransport, /scanFailureListener\?\.invoke\("ble"/);
+assert.match(androidTransport, /ScanStartResult\(/);
+assert.match(androidTransport, /"BLE_SCAN_FAILED"/);
+assert.match(androidTransport, /@Volatile private var bleScanCallback/);
+assert.match(androidTransport, /if \(bleScanCallback !== this\) return/);
+assert.match(androidTransport, /synchronized\(scannedDevicesLock\)/);
+assert.match(androidModule, /payload\["errorCode"\] = errorCode/);
+assert.match(androidModule, /catch \(error: CancellationException\)/);
+assert.match(androidModule, /"SCAN_POLL_FAILED"/);
+assert.match(androidModule, /val wantsSpp = transportFilter == "spp"/);
+assert.doesNotMatch(androidModule, /val wantsSpp = transportFilter == null \|\| transportFilter == "spp"/);
 assert.match(androidStore, /\.commit\(\)/);
 assert.doesNotMatch(androidStore, /\.apply\(\)/);
 assert.match(plugin, /NSBluetoothAlwaysUsageDescription/);

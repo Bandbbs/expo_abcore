@@ -1,18 +1,27 @@
 import CoreBluetooth
 import ExpoModulesCore
 import Foundation
+import OSLog
 
 private let profilesKey = "device_profiles_v1"
 private let jobsKey = "install_jobs_v1"
+private let preferredProfileKey = "preferred_device_profile_v1"
+private let nativeLogger = Logger(subsystem: "com.bandbbs.expoabcore", category: "Native")
 
 public final class ExpoABCoreModule: Module {
   private let store = KeychainJsonStore()
   private let transport = BluetoothTransport()
+  private let recoveryQueue = DispatchQueue(label: "com.bandbbs.expoabcore.recovery")
+  private let recoveryStateLock = NSLock()
+  private let connectionLock = NSRecursiveLock()
   private var activeProfileId: String?
   private var activeKind: String?
   private var activeAddress: String?
   private var scanKindFilter: String?
   private var installing = false
+  private var recoveryScheduled = false
+  private var recoveryRequested = false
+  private var destroyed = false
   private lazy var runtime = ExpoABCoreRuntime(
     transport: transport,
     event: { [weak self] name, payload in self?.handleRustEvent(name, payload) }
@@ -28,9 +37,9 @@ public final class ExpoABCoreModule: Module {
       "installJobChanged"
     )
 
-    OnCreate {
-      transport.ensureInitialized()
-      transport.onDiscovery = { [weak self] device in
+    OnCreate { [weak self] in
+      guard let self else { return }
+      self.transport.onDiscovery = { [weak self] device in
         guard self?.scanKindFilter == nil || self?.scanKindFilter == device.kind else { return }
         self?.sendEvent("scanResult", [
           "name": device.name,
@@ -40,14 +49,40 @@ public final class ExpoABCoreModule: Module {
           "rssi": device.rssi,
         ])
       }
-      transport.onPacket = { [weak self] data in self?.runtime.onPacket(data) }
-      transport.onDisconnect = { [weak self] error in self?.handleDisconnect(error) }
+      self.transport.onPacket = { [weak self] data in self?.runtime.onPacket(data) }
+      self.transport.onDisconnect = { [weak self] error in self?.handleDisconnect(error) }
+      self.transport.onStateChanged = { [weak self] state in
+        guard let self else { return }
+        if state == .poweredOn {
+          self.scheduleRecovery()
+        } else {
+          self.scanKindFilter = nil
+          self.sendEvent("scanStateChanged", ["scanning": false])
+        }
+      }
+      self.transport.ensureInitialized()
+      self.scheduleRecovery()
     }
 
-    OnDestroy {
-      transport.stopScan()
-      runtime.disconnectCore()
-      transport.disconnect()
+    OnAppBecomesActive { [weak self] in
+      self?.scheduleRecovery()
+    }
+
+    OnDestroy { [weak self] in
+      guard let self else { return }
+      self.recoveryStateLock.lock()
+      self.destroyed = true
+      self.recoveryRequested = false
+      self.recoveryStateLock.unlock()
+      self.transport.stopScan()
+      self.runtime.disconnectCore()
+      self.transport.disconnect()
+      self.connectionLock.lock()
+      self.activeProfileId = nil
+      self.activeKind = nil
+      self.activeAddress = nil
+      ExpoABCoreRuntimeState.shared.clear()
+      self.connectionLock.unlock()
       expo_abcore_clear_callbacks()
     }
 
@@ -70,8 +105,18 @@ public final class ExpoABCoreModule: Module {
         throw ModuleError("UNSUPPORTED_TRANSPORT", "SPP is not available on iOS")
       }
       self.scanKindFilter = options?["kind"] as? String
-      try transport.startScan()
-      self.sendEvent("scanStateChanged", ["scanning": true])
+      do {
+        try transport.startScan()
+        self.sendEvent("scanStateChanged", ["scanning": true])
+      } catch {
+        self.scanKindFilter = nil
+        self.sendEvent("scanStateChanged", [
+          "scanning": false,
+          "errorCode": "BLUETOOTH_UNAVAILABLE",
+          "errorMessage": error.localizedDescription,
+        ])
+        throw error
+      }
     }
 
     AsyncFunction("stopScan") {
@@ -124,7 +169,11 @@ public final class ExpoABCoreModule: Module {
 
     AsyncFunction("removeDeviceProfile") { (id: String) throws in
       try self.ensureNotInstalling()
-      if self.activeProfileId == id { self.disconnectNow() }
+      if self.activeProfileId == id {
+        self.disconnectNow()
+      } else if self.preferredProfileId() == id {
+        try self.setPreferredProfileId(nil)
+      }
       try self.saveProfiles(self.profiles().filter { $0["id"] as? String != id })
     }
 
@@ -138,8 +187,10 @@ public final class ExpoABCoreModule: Module {
     }
 
     AsyncFunction("getDeviceSnapshot") { (id: String?) -> [String: Any]? in
-      guard let profile = self.profile(id ?? self.activeProfileId) else { return nil }
-      let state = profile["id"] as? String == self.activeProfileId ? "connected" : "disconnected"
+      let targetId = id ?? self.activeProfileId ?? self.preferredProfileId()
+      guard let profile = self.profile(targetId) else { return nil }
+      let connected = profile["id"] as? String == self.activeProfileId && self.transport.isReady
+      let state = connected ? "connected" : "disconnected"
       return self.snapshot(profile, state: state)
     }
 
@@ -170,11 +221,18 @@ public final class ExpoABCoreModule: Module {
 
     AsyncFunction("deviceResource") {
       (profileId: String, action: String, id: String?) throws -> Any? in
-      try self.ensureNotInstalling()
-      guard self.activeProfileId == profileId, let address = self.activeAddress else {
-        throw ModuleError("DEVICE_DISCONNECTED", "Connected device changed")
+      try self.withConnectionLock {
+        try self.ensureNotInstalling()
+        guard self.activeProfileId == profileId, self.transport.isReady,
+              let address = self.activeAddress
+        else {
+          throw ModuleError("DEVICE_DISCONNECTED", "Connected device changed")
+        }
+        return try self.runtime.call(
+          "resource",
+          ["address": address, "action": action, "id": id ?? ""]
+        )
       }
-      return try self.runtime.call("resource", ["address": address, "action": action, "id": id ?? ""])
     }
 
     AsyncFunction("classifyInstallFile") {
@@ -224,11 +282,20 @@ public final class ExpoABCoreModule: Module {
   }
 
   private func connectProfile(_ id: String) throws -> [String: Any] {
+    connectionLock.lock()
+    defer { connectionLock.unlock() }
     guard let profile = profile(id) else {
       throw ModuleError("PROFILE_NOT_FOUND", "Device profile not found")
     }
-    if activeProfileId == id { return try refreshSnapshot() }
-    disconnectNow()
+    if activeProfileId == id, transport.isReady {
+      do {
+        return try refreshSnapshot()
+      } catch {
+        disconnectNow(clearPreference: false)
+      }
+    } else {
+      disconnectNow(clearPreference: false)
+    }
     sendEvent("connectionChanged", snapshot(profile, state: "connecting"))
     let kind = profile["kind"] as? String ?? "xiaomi"
     let address = profile["address"] as? String ?? ""
@@ -242,6 +309,7 @@ public final class ExpoABCoreModule: Module {
       request["preferredTransport"] = "ble"
       request["bleMtu"] = mtu
       _ = try runtime.call("connect", request)
+      try setPreferredProfileId(id)
       var values = profiles()
       if let index = values.firstIndex(where: { $0["id"] as? String == id }) {
         values[index]["lastConnectedAt"] = Int(Date().timeIntervalSince1970 * 1000)
@@ -251,16 +319,27 @@ public final class ExpoABCoreModule: Module {
       sendEvent("connectionChanged", result)
       return result
     } catch {
-      disconnectNow()
+      let reportedError: Error
+      if case BluetoothError.pairingInformationRemoved = error {
+        reportedError = ModuleError(
+          "PAIRING_INFORMATION_REMOVED",
+          "The device removed its Bluetooth pairing information"
+        )
+      } else {
+        reportedError = error
+      }
+      disconnectNow(clearPreference: false)
       sendEvent(
         "connectionChanged",
-        snapshot(profile, state: "failed", error: error)
+        snapshot(profile, state: "failed", error: reportedError)
       )
-      throw error
+      throw reportedError
     }
   }
 
-  private func disconnectNow() {
+  private func disconnectNow(clearPreference: Bool = true) {
+    connectionLock.lock()
+    defer { connectionLock.unlock() }
     runtime.disconnectCore()
     transport.disconnect()
     let oldId = activeProfileId
@@ -268,15 +347,23 @@ public final class ExpoABCoreModule: Module {
     activeKind = nil
     activeAddress = nil
     ExpoABCoreRuntimeState.shared.clear()
+    if clearPreference { try? setPreferredProfileId(nil) }
     if let oldId, let oldProfile = profile(oldId) {
       sendEvent("connectionChanged", snapshot(oldProfile, state: "disconnected"))
     }
   }
 
   private func refreshSnapshot() throws -> [String: Any] {
+    connectionLock.lock()
+    defer { connectionLock.unlock() }
     guard let id = activeProfileId, let profile = profile(id),
           let address = profile["address"] as? String
     else { throw ModuleError("NO_DEVICE", "No connected device") }
+    guard transport.isReady else {
+      let error = BluetoothError.connectionFailed
+      handleDisconnect(error)
+      throw ModuleError("DEVICE_DISCONNECTED", error.localizedDescription)
+    }
     let data = try runtime.call("refresh", ["address": address]) as? [String: Any] ?? [:]
     let result = snapshot(profile, state: "connected", data: data)
     sendEvent("deviceSnapshotChanged", result)
@@ -302,6 +389,66 @@ public final class ExpoABCoreModule: Module {
   private func profile(_ id: String?) -> [String: Any]? {
     guard let id else { return nil }
     return profiles().first { $0["id"] as? String == id }
+  }
+
+  private func preferredProfileId() -> String? {
+    let value = store.string(for: preferredProfileKey, fallback: "")
+    return value.isEmpty ? nil : value
+  }
+
+  private func setPreferredProfileId(_ id: String?) throws {
+    try store.set(id ?? "", for: preferredProfileKey)
+  }
+
+  private func withConnectionLock<T>(_ body: () throws -> T) rethrows -> T {
+    connectionLock.lock()
+    defer { connectionLock.unlock() }
+    return try body()
+  }
+
+  private func scheduleRecovery() {
+    recoveryStateLock.lock()
+    if destroyed {
+      recoveryStateLock.unlock()
+      return
+    }
+    if recoveryScheduled {
+      recoveryRequested = true
+      recoveryStateLock.unlock()
+      return
+    }
+    recoveryScheduled = true
+    recoveryRequested = false
+    recoveryStateLock.unlock()
+    recoveryQueue.async { [weak self] in
+      guard let self else { return }
+      defer {
+        self.recoveryStateLock.lock()
+        let repeatRecovery = self.recoveryRequested
+        self.recoveryScheduled = false
+        self.recoveryRequested = false
+        self.recoveryStateLock.unlock()
+        if repeatRecovery { self.scheduleRecovery() }
+      }
+      self.connectionLock.lock()
+      defer { self.connectionLock.unlock() }
+      guard !self.isDestroyed() else { return }
+      guard let id = self.preferredProfileId() else { return }
+      if self.activeProfileId == id && self.transport.isReady {
+        return
+      }
+      do {
+        _ = try self.connectProfile(id)
+      } catch {
+        if self.profile(id) == nil { try? self.setPreferredProfileId(nil) }
+      }
+    }
+  }
+
+  private func isDestroyed() -> Bool {
+    recoveryStateLock.lock()
+    defer { recoveryStateLock.unlock() }
+    return destroyed
   }
 
   private func publicProfile(_ profile: [String: Any]) -> [String: Any] {
@@ -403,6 +550,14 @@ public final class ExpoABCoreModule: Module {
   }
 
   private func handleRustEvent(_ name: String, _ payload: [String: Any]) {
+    if name == "protocolTrace" {
+      guard JSONSerialization.isValidJSONObject(payload),
+            let data = try? JSONSerialization.data(withJSONObject: payload),
+            let value = String(data: data, encoding: .utf8)
+      else { return }
+      nativeLogger.notice("Protocol trace: \(value, privacy: .public)")
+      return
+    }
     guard name == "installProgress" else { return }
     sendEvent("installJobChanged", [
       "id": payload["id"] ?? "",
@@ -412,8 +567,11 @@ public final class ExpoABCoreModule: Module {
   }
 
   private func handleDisconnect(_ error: Error?) {
-    guard let id = activeProfileId, let profile = profile(id) else { return }
+    // Cancel an in-flight core request before waiting for a connection operation to unwind.
     runtime.disconnectCore()
+    connectionLock.lock()
+    defer { connectionLock.unlock() }
+    guard let id = activeProfileId, let profile = profile(id) else { return }
     activeProfileId = nil
     activeKind = nil
     activeAddress = nil
@@ -469,9 +627,20 @@ private final class ExpoABCoreRuntime {
     else { throw ModuleError("NATIVE_ERROR", "Invalid native response") }
     if response["ok"] as? Bool == true { return response["data"] }
     let error = response["error"] as? [String: Any]
+    let code = error?["code"] as? String ?? "NATIVE_ERROR"
+    let message = error?["message"] as? String ?? "Native operation failed"
+    if command == "resource" {
+      nativeLogger.error(
+        "Native resource command failed [\(code, privacy: .public)]: \(message, privacy: .public)"
+      )
+    } else {
+      nativeLogger.error(
+        "Native command \(command, privacy: .public) failed [\(code, privacy: .public)]"
+      )
+    }
     throw ModuleError(
-      error?["code"] as? String ?? "NATIVE_ERROR",
-      error?["message"] as? String ?? "Native operation failed"
+      code,
+      message
     )
   }
 

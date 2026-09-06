@@ -3,7 +3,7 @@ mod authkey;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::fs;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Once, OnceLock};
 use std::time::Duration;
 
@@ -52,6 +52,26 @@ static CALLBACKS: OnceLock<Mutex<Option<CallbackContext>>> = OnceLock::new();
 static ACTIVE_DEVICE: OnceLock<Mutex<Option<ActiveDevice>>> = OnceLock::new();
 static JVM: OnceCell<JavaVM> = OnceCell::new();
 static JAVA_BRIDGE: OnceLock<Mutex<Option<GlobalRef>>> = OnceLock::new();
+static RESOURCE_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+struct ResourceTraceGuard;
+
+impl ResourceTraceGuard {
+    fn start() -> Self {
+        RESOURCE_TRACE_COUNT.fetch_add(1, Ordering::AcqRel);
+        Self
+    }
+}
+
+impl Drop for ResourceTraceGuard {
+    fn drop(&mut self) {
+        RESOURCE_TRACE_COUNT.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+fn resource_trace_enabled() -> bool {
+    RESOURCE_TRACE_COUNT.load(Ordering::Acquire) > 0
+}
 
 fn runtime() -> &'static Runtime {
     RUNTIME.get_or_init(corelib::asyncrt::build_runtime)
@@ -138,6 +158,23 @@ pub extern "C" fn expo_abcore_init() -> c_int {
         corelib::init();
         let _ = callbacks();
         let _ = active_device();
+        xiaomi_dispatcher::register_observer(Arc::new(|packet| {
+            if !resource_trace_enabled() {
+                return;
+            }
+            emit_event(
+                "protocolTrace",
+                &json!({
+                    "stage": "decoded",
+                    "channelId": packet.channel_id,
+                    "opcodeId": packet.opcode_id,
+                    "payloadLength": packet.payload.len(),
+                    "protobufTypeId": packet.protobuf_type_id,
+                    "protobufPacketId": packet.protobuf_packet_id,
+                })
+                .to_string(),
+            );
+        }));
     });
     0
 }
@@ -207,6 +244,21 @@ pub unsafe extern "C" fn expo_abcore_on_packet(
         return -1;
     }
     let data = unsafe { std::slice::from_raw_parts(data_ptr, data_len) }.to_vec();
+    if resource_trace_enabled() {
+        let declared_payload_length = data
+            .get(4..6)
+            .map(|value| u16::from_le_bytes([value[0], value[1]]) as usize);
+        emit_event(
+            "protocolTrace",
+            &json!({
+                "stage": "transport",
+                "length": data_len,
+                "startsWithFrameHeader": data.starts_with(&[0xa5, 0xa5]),
+                "declaredPayloadLength": declared_payload_length,
+            })
+            .to_string(),
+        );
+    }
     let handle = runtime().handle().clone();
     if kind == "vivo" {
         corelib::device::vivo::packet::on_packet(handle, address, data);
@@ -257,6 +309,8 @@ fn resource_command(request: Value) -> Result<Value> {
     let action = request["action"]
         .as_str()
         .context("Missing resource action")?;
+    let _trace_guard =
+        matches!(action, "listWatchfaces" | "listApps").then(ResourceTraceGuard::start);
     let id = request["id"].as_str().unwrap_or_default().to_string();
     runtime().block_on(async move {
         tokio::time::timeout(Duration::from_secs(20), async move {

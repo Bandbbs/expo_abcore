@@ -21,6 +21,9 @@ function withExpoABCore(config, options = {}) {
     next.modResults.NSBluetoothAlwaysUsageDescription =
       options.bluetoothPermission ||
       '允许应用通过蓝牙连接、管理设备并安装资源。';
+    next.modResults.UIBackgroundModes = [
+      ...new Set([...(next.modResults.UIBackgroundModes || []), 'bluetooth-central']),
+    ];
     return next;
   });
 

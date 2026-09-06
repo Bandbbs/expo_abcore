@@ -1,5 +1,6 @@
 import CoreBluetooth
 import Foundation
+import OSLog
 
 struct DiscoveredWearable {
   let name: String
@@ -12,21 +13,40 @@ final class BluetoothTransport: NSObject, CBCentralManagerDelegate, CBPeripheral
   var onDiscovery: ((DiscoveredWearable) -> Void)?
   var onPacket: ((Data) -> Void)?
   var onDisconnect: ((Error?) -> Void)?
+  var onStateChanged: ((CBManagerState) -> Void)?
 
   private let queue = DispatchQueue(label: "com.bandbbs.expoabcore.bluetooth")
-  private lazy var central = CBCentralManager(delegate: self, queue: queue)
+  private let logger = Logger(subsystem: "com.bandbbs.expoabcore", category: "Bluetooth")
+  private let sendLock = NSLock()
+  private let stateCondition = NSCondition()
+  private lazy var central = CBCentralManager(
+    delegate: self,
+    queue: queue,
+    options: [
+      CBCentralManagerOptionRestoreIdentifierKey: "com.bandbbs.expoabcore.central",
+      CBCentralManagerOptionShowPowerAlertKey: true,
+    ]
+  )
   private var peripherals: [UUID: CBPeripheral] = [:]
   private var activePeripheral: CBPeripheral?
+  private var serviceProbeCharacteristic: CBCharacteristic?
   private var writeCharacteristic: CBCharacteristic?
   private var notifyCharacteristic: CBCharacteristic?
   private var connectSemaphore: DispatchSemaphore?
   private var servicesSemaphore: DispatchSemaphore?
-  private var stateSemaphore: DispatchSemaphore?
   private var connectError: Error?
+  private var notificationReady = false
   private var expectedKind = "xiaomi"
   private var manualDisconnects = Set<UUID>()
 
   var authorization: CBManagerAuthorization { CBManager.authorization }
+
+  var isReady: Bool {
+    activePeripheral?.state == .connected
+      && writeCharacteristic != nil
+      && notifyCharacteristic != nil
+      && notificationReady
+  }
 
   func ensureInitialized() {
     _ = central
@@ -34,18 +54,42 @@ final class BluetoothTransport: NSObject, CBCentralManagerDelegate, CBPeripheral
 
   func waitForAuthorization(timeout: TimeInterval = 15) -> CBManagerAuthorization {
     ensureInitialized()
-    if central.state == .unknown || authorization == .notDetermined {
-      let waiter = DispatchSemaphore(value: 0)
-      stateSemaphore = waiter
-      _ = waiter.wait(timeout: .now() + timeout)
-      stateSemaphore = nil
-    }
+    let deadline = Date(timeIntervalSinceNow: timeout)
+    stateCondition.lock()
+    while (central.state == .unknown || authorization == .notDetermined)
+      && stateCondition.wait(until: deadline) {}
+    stateCondition.unlock()
     return authorization
   }
 
-  func startScan() throws {
+  func waitUntilPoweredOn(timeout: TimeInterval = 6) throws {
     ensureInitialized()
-    guard central.state == .poweredOn else { throw BluetoothError.unavailable }
+    let deadline = Date(timeIntervalSinceNow: timeout)
+    stateCondition.lock()
+    while central.state == .unknown || central.state == .resetting {
+      if !stateCondition.wait(until: deadline) { break }
+    }
+    let state = central.state
+    stateCondition.unlock()
+    switch state {
+    case .poweredOn:
+      return
+    case .poweredOff:
+      throw BluetoothError.poweredOff
+    case .unauthorized:
+      throw BluetoothError.unauthorized
+    case .unsupported:
+      throw BluetoothError.unsupported
+    case .unknown, .resetting:
+      throw BluetoothError.unavailable
+    @unknown default:
+      throw BluetoothError.unavailable
+    }
+  }
+
+  func startScan() throws {
+    try waitUntilPoweredOn()
+    central.stopScan()
     peripherals.removeAll()
     central.scanForPeripherals(
       withServices: nil,
@@ -57,9 +101,13 @@ final class BluetoothTransport: NSObject, CBCentralManagerDelegate, CBPeripheral
     central.stopScan()
   }
 
-  func connect(address: String, kind: String, timeout: TimeInterval = 30) throws -> Int {
-    ensureInitialized()
-    guard central.state == .poweredOn else { throw BluetoothError.unavailable }
+  func connect(
+    address: String,
+    kind: String,
+    timeout: TimeInterval = 30,
+    notificationAuthorizationTimeout: TimeInterval = 120
+  ) throws -> Int {
+    try waitUntilPoweredOn()
     guard let identifier = UUID(uuidString: address) else { throw BluetoothError.invalidAddress }
     let peripheral = peripherals[identifier]
       ?? central.retrievePeripherals(withIdentifiers: [identifier]).first
@@ -70,23 +118,32 @@ final class BluetoothTransport: NSObject, CBCentralManagerDelegate, CBPeripheral
     activePeripheral = peripheral
     peripheral.delegate = self
     connectError = nil
-    let connectWaiter = DispatchSemaphore(value: 0)
-    connectSemaphore = connectWaiter
-    central.connect(peripheral)
-    guard connectWaiter.wait(timeout: .now() + timeout) == .success else {
-      central.cancelPeripheralConnection(peripheral)
-      throw BluetoothError.timeout
+    if peripheral.state != .connected {
+      let connectWaiter = DispatchSemaphore(value: 0)
+      connectSemaphore = connectWaiter
+      central.connect(peripheral)
+      guard connectWaiter.wait(timeout: .now() + timeout) == .success else {
+        connectSemaphore = nil
+        disconnect()
+        throw BluetoothError.timeout
+      }
+      connectSemaphore = nil
+      if let connectError { throw normalizedConnectionError(connectError) }
     }
-    if let connectError { throw connectError }
 
+    connectError = nil
+    notificationReady = false
     let servicesWaiter = DispatchSemaphore(value: 0)
     servicesSemaphore = servicesWaiter
     peripheral.discoverServices(nil)
-    guard servicesWaiter.wait(timeout: .now() + timeout) == .success else {
+    guard servicesWaiter.wait(timeout: .now() + notificationAuthorizationTimeout) == .success else {
+      logger.error("Timed out waiting for BLE services and notification authorization")
       disconnect()
-      throw BluetoothError.timeout
+      throw BluetoothError.notificationAuthorizationTimedOut
     }
-    guard writeCharacteristic != nil, notifyCharacteristic != nil else {
+    servicesSemaphore = nil
+    if let connectError { throw normalizedConnectionError(connectError) }
+    guard writeCharacteristic != nil, notifyCharacteristic != nil, notificationReady else {
       disconnect()
       throw BluetoothError.characteristicNotFound
     }
@@ -94,22 +151,35 @@ final class BluetoothTransport: NSObject, CBCentralManagerDelegate, CBPeripheral
   }
 
   func disconnect() {
+    let pendingConnect = connectSemaphore
+    let pendingServices = servicesSemaphore
+    connectError = BluetoothError.connectionFailed
     if let peripheral = activePeripheral {
       manualDisconnects.insert(peripheral.identifier)
       central.cancelPeripheralConnection(peripheral)
     }
     activePeripheral = nil
+    serviceProbeCharacteristic = nil
     writeCharacteristic = nil
     notifyCharacteristic = nil
+    notificationReady = false
     connectSemaphore = nil
     servicesSemaphore = nil
+    pendingConnect?.signal()
+    pendingServices?.signal()
   }
 
   func send(_ data: Data) -> Bool {
+    sendLock.lock()
+    defer { sendLock.unlock() }
     guard let peripheral = activePeripheral,
           let characteristic = writeCharacteristic,
-          peripheral.state == .connected
-    else { return false }
+          peripheral.state == .connected,
+          notificationReady
+    else {
+      logger.error("Rejected a BLE write because the transport is not ready")
+      return false
+    }
     let type: CBCharacteristicWriteType = characteristic.properties.contains(.writeWithoutResponse)
       ? .withoutResponse
       : .withResponse
@@ -125,7 +195,24 @@ final class BluetoothTransport: NSObject, CBCentralManagerDelegate, CBPeripheral
   }
 
   func centralManagerDidUpdateState(_ central: CBCentralManager) {
-    stateSemaphore?.signal()
+    stateCondition.lock()
+    stateCondition.broadcast()
+    stateCondition.unlock()
+    if let error = stateError(central.state), let peripheral = activePeripheral {
+      handleDisconnect(peripheral, error: error)
+    }
+    onStateChanged?(central.state)
+  }
+
+  func centralManager(
+    _ central: CBCentralManager,
+    willRestoreState dict: [String: Any]
+  ) {
+    let restored = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral] ?? []
+    for peripheral in restored {
+      peripherals[peripheral.identifier] = peripheral
+      peripheral.delegate = self
+    }
   }
 
   func centralManager(
@@ -154,6 +241,11 @@ final class BluetoothTransport: NSObject, CBCentralManagerDelegate, CBPeripheral
   }
 
   func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+    guard activePeripheral?.identifier == peripheral.identifier else {
+      manualDisconnects.insert(peripheral.identifier)
+      central.cancelPeripheralConnection(peripheral)
+      return
+    }
     manualDisconnects.remove(peripheral.identifier)
     connectSemaphore?.signal()
   }
@@ -164,6 +256,7 @@ final class BluetoothTransport: NSObject, CBCentralManagerDelegate, CBPeripheral
     error: Error?
   ) {
     manualDisconnects.remove(peripheral.identifier)
+    guard activePeripheral?.identifier == peripheral.identifier else { return }
     connectError = error ?? BluetoothError.connectionFailed
     connectSemaphore?.signal()
   }
@@ -187,9 +280,9 @@ final class BluetoothTransport: NSObject, CBCentralManagerDelegate, CBPeripheral
   }
 
   func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
+    guard activePeripheral?.identifier == peripheral.identifier else { return }
     if let error {
-      connectError = error
-      servicesSemaphore?.signal()
+      finishServiceDiscovery(error: error)
       return
     }
     let services = peripheral.services ?? []
@@ -200,7 +293,7 @@ final class BluetoothTransport: NSObject, CBCentralManagerDelegate, CBPeripheral
         || compact == "0000276008c211e190730e8ac72e1011"
     }
     if relevant.isEmpty {
-      servicesSemaphore?.signal()
+      finishServiceDiscovery()
       return
     }
     for service in relevant { peripheral.discoverCharacteristics(nil, for: service) }
@@ -211,23 +304,55 @@ final class BluetoothTransport: NSObject, CBCentralManagerDelegate, CBPeripheral
     didDiscoverCharacteristicsFor service: CBService,
     error: Error?
   ) {
-    if let error { connectError = error }
+    guard activePeripheral?.identifier == peripheral.identifier else { return }
+    if let error {
+      finishServiceDiscovery(error: error)
+      return
+    }
     for characteristic in service.characteristics ?? [] {
       let compact = characteristic.uuid.uuidString
         .replacingOccurrences(of: "-", with: "")
         .lowercased()
+      if expectedKind == "xiaomi", compact.contains("0050") {
+        serviceProbeCharacteristic = characteristic
+      }
       if compact.contains("005f") || compact == "0000276008c211e190730e8ac72e0011" {
         writeCharacteristic = characteristic
       }
       if compact.contains("005e") || compact == "0000276008c211e190730e8ac72e0012" {
         notifyCharacteristic = characteristic
-        peripheral.setNotifyValue(true, for: characteristic)
+        if characteristic.isNotifying {
+          notificationReady = true
+        } else {
+          peripheral.setNotifyValue(true, for: characteristic)
+        }
       }
     }
-    if writeCharacteristic != nil, notifyCharacteristic != nil {
-      servicesSemaphore?.signal()
-      servicesSemaphore = nil
+    finishServiceDiscoveryIfReady()
+  }
+
+  func peripheral(
+    _ peripheral: CBPeripheral,
+    didUpdateNotificationStateFor characteristic: CBCharacteristic,
+    error: Error?
+  ) {
+    guard activePeripheral?.identifier == peripheral.identifier,
+          let notifyCharacteristic,
+          characteristic === notifyCharacteristic
+    else { return }
+    if let error {
+      logger.error("BLE notification subscription failed: \(error.localizedDescription, privacy: .public)")
+      finishServiceDiscovery(error: error)
+      return
     }
+    guard characteristic.isNotifying else {
+      logger.error("BLE notification subscription completed without enabling notifications")
+      finishServiceDiscovery(error: BluetoothError.notificationSubscriptionFailed)
+      return
+    }
+    notificationReady = true
+    logger.notice("BLE notification subscription is ready")
+    finishServiceDiscoveryIfReady()
   }
 
   func peripheral(
@@ -235,8 +360,35 @@ final class BluetoothTransport: NSObject, CBCentralManagerDelegate, CBPeripheral
     didUpdateValueFor characteristic: CBCharacteristic,
     error: Error?
   ) {
-    guard error == nil, let value = characteristic.value else { return }
+    guard activePeripheral?.identifier == peripheral.identifier,
+          let notifyCharacteristic,
+          characteristic === notifyCharacteristic
+    else { return }
+    if let error {
+      logger.error("BLE notification update failed: \(error.localizedDescription, privacy: .public)")
+      return
+    }
+    guard let value = characteristic.value else { return }
     onPacket?(value)
+  }
+
+  private func finishServiceDiscoveryIfReady() {
+    guard servicesSemaphore != nil,
+          writeCharacteristic != nil,
+          notifyCharacteristic != nil,
+          notificationReady
+    else { return }
+    if let peripheral = activePeripheral, let probe = serviceProbeCharacteristic {
+      peripheral.readValue(for: probe)
+    }
+    finishServiceDiscovery()
+  }
+
+  private func finishServiceDiscovery(error: Error? = nil) {
+    if let error { connectError = error }
+    guard let waiter = servicesSemaphore else { return }
+    servicesSemaphore = nil
+    waiter.signal()
   }
 
   private func classify(name: String, services: [CBUUID], manufacturer: Data?) -> String? {
@@ -261,29 +413,69 @@ final class BluetoothTransport: NSObject, CBCentralManagerDelegate, CBPeripheral
   private func handleDisconnect(_ peripheral: CBPeripheral, error: Error?) {
     if manualDisconnects.remove(peripheral.identifier) != nil { return }
     guard activePeripheral?.identifier == peripheral.identifier else { return }
+    let reportedError = error ?? BluetoothError.connectionFailed
+    connectError = reportedError
+    connectSemaphore?.signal()
+    servicesSemaphore?.signal()
     activePeripheral = nil
+    serviceProbeCharacteristic = nil
     writeCharacteristic = nil
     notifyCharacteristic = nil
-    onDisconnect?(error)
+    notificationReady = false
+    onDisconnect?(reportedError)
+  }
+
+  private func stateError(_ state: CBManagerState) -> Error? {
+    switch state {
+    case .poweredOff:
+      BluetoothError.poweredOff
+    case .unauthorized:
+      BluetoothError.unauthorized
+    case .unsupported:
+      BluetoothError.unsupported
+    default:
+      nil
+    }
+  }
+
+  private func normalizedConnectionError(_ error: Error) -> Error {
+    let value = error as NSError
+    if value.code == CBError.peerRemovedPairingInformation.rawValue
+      && (value.domain == CBErrorDomain || value.domain == CBATTErrorDomain) {
+      return BluetoothError.pairingInformationRemoved
+    }
+    return error
   }
 }
 
 enum BluetoothError: LocalizedError {
   case unavailable
+  case poweredOff
+  case unauthorized
+  case unsupported
   case invalidAddress
   case notFound
   case timeout
   case connectionFailed
   case characteristicNotFound
+  case notificationAuthorizationTimedOut
+  case notificationSubscriptionFailed
+  case pairingInformationRemoved
 
   var errorDescription: String? {
     switch self {
     case .unavailable: "Bluetooth is unavailable"
+    case .poweredOff: "Bluetooth is turned off"
+    case .unauthorized: "Bluetooth permission was denied"
+    case .unsupported: "Bluetooth Low Energy is not supported on this device"
     case .invalidAddress: "Invalid peripheral identifier"
     case .notFound: "Bluetooth device not found"
     case .timeout: "Bluetooth connection timed out"
     case .connectionFailed: "Bluetooth connection failed"
     case .characteristicNotFound: "Required wearable characteristics were not found"
+    case .notificationAuthorizationTimedOut: "Bluetooth notification authorization timed out"
+    case .notificationSubscriptionFailed: "Bluetooth notification subscription failed"
+    case .pairingInformationRemoved: "The device removed its Bluetooth pairing information"
     }
   }
 }

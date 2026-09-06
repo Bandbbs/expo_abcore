@@ -8,9 +8,14 @@ const androidModule = read('android/src/main/java/com/bandbbs/expoabcore/ExpoABC
 const androidStore = read('android/src/main/java/com/bandbbs/expoabcore/SecureJsonStore.kt');
 const androidManifest = read('android/src/main/AndroidManifest.xml');
 const iosModule = read('ios/ExpoABCoreModule.swift');
+const iosTransport = read('ios/BluetoothTransport.swift');
 const iosStore = read('ios/KeychainJsonStore.swift');
 const plugin = read('plugin/withExpoABCore.js');
+const rustBuild = read('scripts/build-rust.mjs');
 const types = read('src/types.ts');
+const iosRustArchive = readFileSync(
+  resolve(root, 'ios/Native/ExpoABCoreRust.xcframework/ios-arm64/libexpo_abcore.a'),
+);
 
 const events = [
   'scanResult',
@@ -41,7 +46,24 @@ assert.doesNotMatch(plugin, /neverForLocation/);
 assert.match(androidStore, /\.commit\(\)/);
 assert.doesNotMatch(androidStore, /\.apply\(\)/);
 assert.match(plugin, /NSBluetoothAlwaysUsageDescription/);
-assert.doesNotMatch(plugin, /UIBackgroundModes/);
+assert.match(plugin, /UIBackgroundModes/);
+assert.match(plugin, /bluetooth-central/);
+assert.match(iosTransport, /CBCentralManagerOptionRestoreIdentifierKey/);
+assert.match(iosTransport, /willRestoreState/);
+assert.match(iosTransport, /didUpdateNotificationStateFor/);
+assert.match(iosTransport, /characteristic\.isNotifying/);
+assert.match(iosTransport, /notificationAuthorizationTimeout: TimeInterval = 120/);
+assert.match(iosTransport, /activePeripheral\?\.identifier == peripheral\.identifier/);
+assert.match(iosTransport, /sendLock\.lock\(\)/);
+assert.match(iosTransport, /serviceProbeCharacteristic/);
+assert.match(iosTransport, /peripheral\.readValue\(for: probe\)/);
+assert.match(iosModule, /OnAppBecomesActive/);
+assert.match(iosModule, /preferred_device_profile_v1/);
+assert.match(iosModule, /protocolTrace/);
+assert.match(rustBuild, /syncDirectoryInPlace/);
+assert.match(rustBuild, /\.ExpoABCoreRust-\$\{process\.pid\}\.xcframework/);
+assert.doesNotMatch(rustBuild, /rmSync\(output,/);
+assert.equal(iosRustArchive.includes(Buffer.from('Missing resource target')), true);
 
 assert.match(androidStore, /AndroidKeyStore/);
 assert.match(androidStore, /AES\/GCM\/NoPadding/);

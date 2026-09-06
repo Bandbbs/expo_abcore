@@ -1,4 +1,14 @@
-import { cpSync, existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
+import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -14,6 +24,39 @@ function run(command, args, options = {}) {
     stdio: 'inherit',
   });
   if (result.status !== 0) process.exit(result.status ?? 1);
+}
+
+function syncDirectoryInPlace(source, destination) {
+  mkdirSync(destination, { recursive: true });
+  const sourceEntries = new Map(
+    readdirSync(source, { withFileTypes: true }).map((entry) => [entry.name, entry]),
+  );
+
+  for (const destinationEntry of readdirSync(destination, { withFileTypes: true })) {
+    if (!sourceEntries.has(destinationEntry.name)) {
+      rmSync(join(destination, destinationEntry.name), { recursive: true, force: true });
+    }
+  }
+
+  for (const entry of sourceEntries.values()) {
+    const sourcePath = join(source, entry.name);
+    const destinationPath = join(destination, entry.name);
+    if (entry.isDirectory()) {
+      if (existsSync(destinationPath) && !lstatSync(destinationPath).isDirectory()) {
+        rmSync(destinationPath, { recursive: true, force: true });
+      }
+      syncDirectoryInPlace(sourcePath, destinationPath);
+      continue;
+    }
+    if (!entry.isFile()) {
+      throw new Error(`Unsupported XCFramework entry: ${sourcePath}`);
+    }
+    if (existsSync(destinationPath) && !lstatSync(destinationPath).isFile()) {
+      rmSync(destinationPath, { recursive: true, force: true });
+    }
+    writeFileSync(destinationPath, readFileSync(sourcePath));
+    chmodSync(destinationPath, lstatSync(sourcePath).mode);
+  }
 }
 
 function newestNdk() {
@@ -74,8 +117,9 @@ function buildIos() {
   }
   const native = join(root, 'ios/Native');
   const output = join(native, 'ExpoABCoreRust.xcframework');
+  const stagedOutput = join(native, `.ExpoABCoreRust-${process.pid}.xcframework`);
   const simulator = join(native, 'libexpo_abcore.a');
-  rmSync(output, { recursive: true, force: true });
+  rmSync(stagedOutput, { recursive: true, force: true });
   run('lipo', [
     '-create',
     join(rust, 'target/aarch64-apple-ios-sim/release/libexpo_abcore.a'),
@@ -88,8 +132,12 @@ function buildIos() {
     '-headers', join(native, 'include'),
     '-library', simulator,
     '-headers', join(native, 'include'),
-    '-output', output,
+    '-output', stagedOutput,
   ]);
+  // pnpm file dependencies hard-link package files into consumers. Updating the
+  // tracked XCFramework in place keeps those links current across local rebuilds.
+  syncDirectoryInPlace(stagedOutput, output);
+  rmSync(stagedOutput, { recursive: true, force: true });
   rmSync(simulator, { force: true });
 }
 
